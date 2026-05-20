@@ -6,3 +6,4 @@ mnemonic
 pynacl
 pycryptodome
 bip-utils
+aiohttp
