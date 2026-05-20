@@ -8,33 +8,13 @@ from multiprocessing import Pool, cpu_count
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from blockchain_checker import check_balance_all, get_addresses
-from mnemonic import Mnemonic
+from seed_extractor import SeedExtractor
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGEOY6H0Bo_mgvbymAJ-vWdmH08GMIQGnM')
 
 user_buffers = {}
 BATCH_WAIT_TIME = 5 
-
-def extract_seeds(text):
-    """Extrai seeds de 12, 15, 18, 21 e 24 palavras."""
-    words = re.findall(r'\b[a-z]+\b', text.lower())
-    potential_seeds = []
-    lengths = [24, 21, 18, 15, 12]
-    
-    try:
-        bip39_list = set(Mnemonic("english").wordlist)
-    except:
-        return []
-    
-    for length in lengths:
-        for i in range(len(words) - length + 1):
-            segment = words[i:i+length]
-            if all(word in bip39_list for word in segment):
-                seed = " ".join(segment)
-                if seed not in potential_seeds:
-                    potential_seeds.append(seed)
-    
-    return potential_seeds
+extractor = SeedExtractor()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = """🤖 **Bot Multi-Blockchain USDT Checker**
@@ -49,9 +29,10 @@ Suporta 30+ blockchains:
 
 📝 **Como usar:**
 1. Envie seeds (12, 15, 18, 21 ou 24 palavras)
-2. Ou envie arquivo .txt com múltiplas seeds
-3. Bot processa até 100k+ combinações
-4. Retorna apenas endereços com saldo em USDT
+2. Palavras separadas por espaço OU juntas (sem espaços)
+3. Ou envie arquivo .txt com múltiplas seeds
+4. Bot processa até 100k+ combinações
+5. Retorna apenas endereços com saldo em USDT
 
 ⚠️ **Apenas para suas próprias carteiras!**"""
     
@@ -69,7 +50,7 @@ async def process_batch(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> Non
         all_text = "\n".join(buffer['contents'])
         del user_buffers[chat_id]
         
-        seeds = extract_seeds(all_text)
+        seeds = extractor.extract_all_seeds(all_text)
         if not seeds:
             await context.bot.send_message(chat_id=chat_id, text="❌ Nenhuma seed válida encontrada.")
             return
