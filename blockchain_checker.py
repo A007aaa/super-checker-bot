@@ -5,6 +5,60 @@ from bip_utils import (
     Bip49, Bip49Coins, Bip84, Bip84Coins, Bip39MnemonicValidator
 )
 
+# ── Tunables ────────────────────────────────────────────────────────────────
+REQUEST_TIMEOUT   = 15          # seconds per individual HTTP request
+SEED_TIMEOUT      = 30          # hard cap for all checks on a single seed
+MAX_RETRIES       = 2           # extra attempts after the first failure
+BACKOFF_BASE      = 1.5         # exponential-backoff multiplier (1.5s, 2.25s)
+CONNECTOR_LIMIT   = 100         # total simultaneous TCP connections in the pool
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (compatible; BlockchainChecker/2.0; "
+        "+https://github.com/blockchain-checker)"
+    )
+}
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def _make_connector() -> aiohttp.TCPConnector:
+    """Return a shared TCPConnector with connection pooling enabled."""
+    return aiohttp.TCPConnector(
+        limit=CONNECTOR_LIMIT,
+        ttl_dns_cache=300,
+        enable_cleanup_closed=True,
+    )
+
+
+async def _fetch_json(session: aiohttp.ClientSession, method: str, url: str, **kwargs):
+    """
+    Perform a GET or POST request with retry + exponential backoff.
+
+    Returns the parsed JSON body on success, or None on permanent failure.
+    Retries up to MAX_RETRIES times on network errors or 5xx responses.
+    """
+    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+    last_exc = None
+
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            req = getattr(session, method)
+            async with req(url, timeout=timeout, headers=HEADERS, **kwargs) as res:
+                if res.status == 200:
+                    return await res.json(content_type=None)
+                if res.status < 500:
+                    # 4xx – no point retrying
+                    return None
+                # 5xx – fall through to retry
+                last_exc = Exception(f"HTTP {res.status}")
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_exc = exc
+
+        if attempt < MAX_RETRIES:
+            await asyncio.sleep(BACKOFF_BASE ** attempt)
+
+    return None
+
+
 async def get_addresses(seed_phrase):
     """Gera endereços para múltiplas blockchains usando BIP44/BIP49/BIP84."""
     try:
@@ -15,10 +69,10 @@ async def get_addresses(seed_phrase):
         try:
             btc_bip44 = Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
             addresses['BTC_Legacy'] = btc_bip44.PublicKey().ToAddress()
-            
+
             btc_bip49 = Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
             addresses['BTC_SegWit'] = btc_bip49.PublicKey().ToAddress()
-            
+
             btc_bip84 = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
             addresses['BTC_Native'] = btc_bip84.PublicKey().ToAddress()
         except:
@@ -28,15 +82,15 @@ async def get_addresses(seed_phrase):
         try:
             eth = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
             eth_addr = eth.PublicKey().ToAddress()
-            addresses['ETH'] = eth_addr
-            addresses['BSC'] = eth_addr
-            addresses['AVAX'] = eth_addr
-            addresses['MATIC'] = eth_addr
-            addresses['ARB'] = eth_addr
-            addresses['OP'] = eth_addr
-            addresses['BASE'] = eth_addr
+            addresses['ETH']    = eth_addr
+            addresses['BSC']    = eth_addr
+            addresses['AVAX']   = eth_addr
+            addresses['MATIC']  = eth_addr
+            addresses['ARB']    = eth_addr
+            addresses['OP']     = eth_addr
+            addresses['BASE']   = eth_addr
             addresses['ZKSYNC'] = eth_addr
-            addresses['LINEA'] = eth_addr
+            addresses['LINEA']  = eth_addr
         except:
             pass
 
@@ -79,102 +133,140 @@ async def get_addresses(seed_phrase):
     except:
         return {}
 
+
+# ── Per-blockchain check coroutines ─────────────────────────────────────────
+
+async def _check_btc(session: aiohttp.ClientSession, btc_type: str, addr: str):
+    """Check a single Bitcoin address (any format) via blockchain.info."""
+    data = await _fetch_json(session, "get",
+                             f"https://blockchain.info/balance?active={addr}")
+    if data is None:
+        return None
+    bal = data.get(addr, {}).get("final_balance", 0) / 10**8
+    return (btc_type, addr, bal) if bal > 0 else None
+
+
+async def _check_eth(session: aiohttp.ClientSession, eth_addr: str):
+    """Check native ETH balance via BlockCypher."""
+    data = await _fetch_json(session, "get",
+                             f"https://api.blockcypher.com/v1/eth/main/addrs/{eth_addr}/balance")
+    if data is None:
+        return None
+    bal = data.get("balance", 0) / 10**18
+    return ("ETH", eth_addr, bal) if bal > 0 else None
+
+
+async def _check_usdt_erc20(session: aiohttp.ClientSession, eth_addr: str):
+    """Check USDT ERC-20 balance via Ethplorer."""
+    data = await _fetch_json(session, "get",
+                             f"https://api.ethplorer.io/getAddressInfo/{eth_addr}?apiKey=freekey")
+    if data is None or 'tokens' not in data:
+        return None
+    for t in data['tokens']:
+        if t['tokenInfo']['symbol'] == 'USDT':
+            bal = float(t['balance']) / (10 ** int(t['tokenInfo']['decimals']))
+            if bal > 0:
+                return ("USDT_ERC20", eth_addr, bal)
+    return None
+
+
+async def _check_trx(session: aiohttp.ClientSession, trx_addr: str):
+    """Check TRX native balance and USDT TRC-20 via TronGrid."""
+    data = await _fetch_json(session, "get",
+                             f"https://api.trongrid.io/v1/accounts/{trx_addr}")
+    if data is None or not data.get('data'):
+        return []
+
+    results = []
+    account = data['data'][0]
+
+    bal = account.get('balance', 0) / 10**6
+    if bal > 0:
+        results.append(("TRX", trx_addr, bal))
+
+    usdt_contract = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
+    for token in account.get('trc20', []):
+        if usdt_contract in token:
+            usdt_bal = float(token[usdt_contract]) / 10**6
+            if usdt_bal > 0:
+                results.append(("USDT_TRC20", trx_addr, usdt_bal))
+
+    return results
+
+
+async def _check_sol(session: aiohttp.ClientSession, sol_addr: str):
+    """Check SOL balance via Solana JSON-RPC."""
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [sol_addr]}
+    data = await _fetch_json(session, "post",
+                             "https://api.mainnet-beta.solana.com", json=payload)
+    if data is None:
+        return None
+    bal = data.get('result', {}).get('value', 0) / 10**9
+    return ("SOL", sol_addr, bal) if bal > 0 else None
+
+
+# ── Main entry point ─────────────────────────────────────────────────────────
+
 async def check_balance_all(seed):
-    """Verifica saldos em múltiplas blockchains."""
+    """
+    Verifica saldos em múltiplas blockchains em paralelo.
+
+    Todas as requisições HTTP são disparadas simultaneamente com
+    asyncio.gather(), respeitando um timeout total de SEED_TIMEOUT segundos
+    por seed e realizando até MAX_RETRIES tentativas por requisição.
+    """
     seed = seed.strip()
     if not seed:
         return None
-    
+
     try:
         if not Bip39MnemonicValidator().IsValid(seed):
             return None
     except:
         return None
-        
+
     addresses = await get_addresses(seed)
     if not addresses:
         return None
-    
-    found = []
-    
-    async with aiohttp.ClientSession() as session:
-        # Bitcoin
-        for btc_type in ['BTC_Legacy', 'BTC_SegWit', 'BTC_Native']:
+
+    connector = _make_connector()
+    async with aiohttp.ClientSession(connector=connector) as session:
+
+        # Build the list of coroutines to run in parallel
+        tasks = []
+
+        for btc_type in ('BTC_Legacy', 'BTC_SegWit', 'BTC_Native'):
             if btc_type in addresses:
-                try:
-                    addr = addresses[btc_type]
-                    async with session.get(f"https://blockchain.info/balance?active={addr}", timeout=aiohttp.ClientTimeout(total=5)) as res:
-                        if res.status == 200:
-                            data = await res.json()
-                            bal = data.get(addr, {}).get("final_balance", 0) / 10**8
-                            if bal > 0:
-                                found.append((btc_type, addr, bal))
-                except:
-                    pass
-        
-        # Ethereum e EVM chains
+                tasks.append(_check_btc(session, btc_type, addresses[btc_type]))
+
         if 'ETH' in addresses:
             eth_addr = addresses['ETH']
-            
-            try:
-                async with session.get(f"https://api.blockcypher.com/v1/eth/main/addrs/{eth_addr}/balance", timeout=aiohttp.ClientTimeout(total=5)) as res:
-                    if res.status == 200:
-                        data = await res.json()
-                        bal = data.get("balance", 0) / 10**18
-                        if bal > 0:
-                            found.append(("ETH", eth_addr, bal))
-            except:
-                pass
-            
-            # USDT ERC20
-            try:
-                async with session.get(f"https://api.ethplorer.io/getAddressInfo/{eth_addr}?apiKey=freekey", timeout=aiohttp.ClientTimeout(total=5)) as res:
-                    if res.status == 200:
-                        data = await res.json()
-                        if 'tokens' in data:
-                            for t in data['tokens']:
-                                if t['tokenInfo']['symbol'] == 'USDT':
-                                    bal = float(t['balance']) / (10**int(t['tokenInfo']['decimals']))
-                                    if bal > 0:
-                                        found.append(("USDT_ERC20", eth_addr, bal))
-            except:
-                pass
-        
-        # Tron e USDT TRC20
-        if 'TRX' in addresses:
-            trx_addr = addresses['TRX']
-            try:
-                async with session.get(f"https://api.trongrid.io/v1/accounts/{trx_addr}", timeout=aiohttp.ClientTimeout(total=5)) as res:
-                    if res.status == 200:
-                        data = await res.json()
-                        if data.get('data'):
-                            bal = data['data'][0].get('balance', 0) / 10**6
-                            if bal > 0:
-                                found.append(("TRX", trx_addr, bal))
-                            
-                            trc20_balances = data['data'][0].get('trc20', [])
-                            for token in trc20_balances:
-                                if 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' in token:
-                                    bal = float(token['TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t']) / 10**6
-                                    if bal > 0:
-                                        found.append(("USDT_TRC20", trx_addr, bal))
-            except:
-                pass
-        
-        # Solana
-        if 'SOL' in addresses:
-            sol_addr = addresses['SOL']
-            try:
-                payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [sol_addr]}
-                async with session.post("https://api.mainnet-beta.solana.com", json=payload, timeout=aiohttp.ClientTimeout(total=5)) as res:
-                    if res.status == 200:
-                        data = await res.json()
-                        bal = data.get('result', {}).get('value', 0) / 10**9
-                        if bal > 0:
-                            found.append(("SOL", sol_addr, bal))
-            except:
-                pass
+            tasks.append(_check_eth(session, eth_addr))
+            tasks.append(_check_usdt_erc20(session, eth_addr))
 
-    if found:
-        return (seed, found)
-    return None
+        if 'TRX' in addresses:
+            tasks.append(_check_trx(session, addresses['TRX']))
+
+        if 'SOL' in addresses:
+            tasks.append(_check_sol(session, addresses['SOL']))
+
+        # Run ALL blockchain checks simultaneously, bounded by SEED_TIMEOUT
+        try:
+            raw_results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=SEED_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raw_results = []
+
+    # Flatten results (some checkers return a list, others a single tuple/None)
+    found = []
+    for item in raw_results:
+        if isinstance(item, Exception) or item is None:
+            continue
+        if isinstance(item, list):
+            found.extend(item)
+        else:
+            found.append(item)
+
+    return (seed, found) if found else None
