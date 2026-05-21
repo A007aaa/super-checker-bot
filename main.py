@@ -10,7 +10,8 @@ from seed_extractor import SeedExtractor
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGEOY6H0Bo_mgvbymAJ-vWdmH08GMIQGnM')
 
 user_buffers = {}
-BATCH_WAIT_TIME = 5 
+BATCH_WAIT_TIME = 10
+MAX_FILE_SIZE = 50 * 1024 * 1024
 extractor = SeedExtractor()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -52,10 +53,15 @@ async def process_batch(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(chat_id=chat_id, text="❌ Nenhuma seed válida encontrada.")
             return
         
-        await context.bot.send_message(chat_id=chat_id, text=f"⏳ Processando {len(seeds)} seeds em múltiplas blockchains...")
+        await context.bot.send_message(chat_id=chat_id, text=f"⏳ Processando {len(seeds)} seeds em múltiplas blockchains...\n\n⏱️ Isso pode levar alguns minutos...")
         
-        # Processa seeds de forma assíncrona
-        tasks = [check_balance_all(seed) for seed in seeds]
+        semaphore = asyncio.Semaphore(10)
+        
+        async def check_with_semaphore(seed):
+            async with semaphore:
+                return await check_balance_all(seed)
+        
+        tasks = [check_with_semaphore(seed) for seed in seeds]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         positivos = [r for r in results if r is not None and not isinstance(r, Exception)]
@@ -104,15 +110,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     document = update.message.document
+    
+    if document.file_size and document.file_size > MAX_FILE_SIZE:
+        await update.message.reply_text(f"❌ Arquivo muito grande! Máximo: 50 MB\nTamanho: {document.file_size / (1024*1024):.2f} MB")
+        return
+    
     file_id = document.file_id
     new_file = await context.bot.get_file(file_id)
     temp_path = os.path.join(tempfile.gettempdir(), f"tmp_{int(time.time())}")
+    
     try:
+        await update.message.reply_text(f"📥 Baixando '{document.file_name}'...")
         await new_file.download_to_drive(temp_path)
+        
+        file_size = os.path.getsize(temp_path)
+        if file_size > MAX_FILE_SIZE:
+            await update.message.reply_text(f"❌ Arquivo muito grande! Máximo: 50 MB\nTamanho: {file_size / (1024*1024):.2f} MB")
+            return
+        
         with open(temp_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
-        await add_to_buffer(update.effective_chat.id, content, context)
+        
         await update.message.reply_text(f"✅ '{document.file_name}' adicionado ao lote...")
+        await add_to_buffer(update.effective_chat.id, content, context)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro ao processar arquivo: {str(e)}")
     finally:
         if os.path.exists(temp_path):
             try:
