@@ -7,11 +7,11 @@ from bip_utils import (
 
 # ── Tunables ────────────────────────────────────────────────────────────────
 REQUEST_TIMEOUT   = 15          
-SEED_TIMEOUT      = 60          # Aumentado para suportar múltiplos endereços
+SEED_TIMEOUT      = 75          # Aumentado para suportar BSC e mais tokens
 MAX_RETRIES       = 2           
 CONNECTOR_LIMIT   = 100         
-CHECK_INDEX_COUNT = 5           # Verifica os primeiros 5 endereços (0 a 4)
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; BlockchainChecker/4.0)"}
+CHECK_INDEX_COUNT = 5           
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; BlockchainChecker/5.0)"}
 # ────────────────────────────────────────────────────────────────────────────
 
 def _make_connector() -> aiohttp.TCPConnector:
@@ -29,21 +29,21 @@ async def _fetch_json(session: aiohttp.ClientSession, method: str, url: str, **k
     return None
 
 async def get_all_addresses(seed_phrase):
-    """Gera endereços para os primeiros N índices de cada moeda."""
     try:
         seed_bytes = Bip39SeedGenerator(seed_phrase).Generate()
-        addr_map = [] # Lista de (moeda, tipo, endereco)
-
+        addr_map = []
         for i in range(CHECK_INDEX_COUNT):
-            # Bitcoin
+            # BTC
             try:
                 addr_map.append(("BTC", f"Legacy_#{i}", Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
                 addr_map.append(("BTC", f"SegWit_#{i}", Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
                 addr_map.append(("BTC", f"Native_#{i}", Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
             except: pass
-            # ETH / EVM
+            # ETH / BSC / EVM
             try:
-                addr_map.append(("ETH", f"ETH_#{i}", Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
+                eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
+                addr_map.append(("ETH", f"ETH_#{i}", eth_addr))
+                addr_map.append(("BSC", f"BSC_#{i}", eth_addr))
             except: pass
             # Tron
             try:
@@ -53,33 +53,31 @@ async def get_all_addresses(seed_phrase):
             try:
                 addr_map.append(("SOL", f"SOL_#{i}", Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
             except: pass
-            # Litecoin
-            try:
-                addr_map.append(("LTC", f"LTC_#{i}", Bip44.FromSeed(seed_bytes, Bip44Coins.LITECOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
-            except: pass
-
         return addr_map
     except: return []
 
-async def check_btc(session, coin, label, addr):
+async def check_btc(session, label, addr):
     data = await _fetch_json(session, "get", f"https://blockchain.info/balance?active={addr}")
     if data:
         bal = data.get(addr, {}).get("final_balance", 0) / 10**8
-        if bal > 0: return (f"{coin} ({label})", addr, bal)
+        if bal > 0: return (f"BTC ({label})", addr, bal)
     return None
 
-async def check_eth_full(session, label, addr):
+async def check_eth_evm(session, network, label, addr):
     results = []
-    # Native
-    data = await _fetch_json(session, "get", f"https://api.blockcypher.com/v1/eth/main/addrs/{addr}/balance")
+    # Native (ETH ou BNB)
+    api_url = f"https://api.blockcypher.com/v1/eth/main/addrs/{addr}/balance" if network == "ETH" else f"https://api.blockcypher.com/v1/bsc/main/addrs/{addr}/balance"
+    data = await _fetch_json(session, "get", api_url)
     if data and data.get("balance", 0) > 0:
-        results.append((f"ETH ({label})", addr, data["balance"] / 10**18))
-    # Tokens
-    data_t = await _fetch_json(session, "get", f"https://api.ethplorer.io/getAddressInfo/{addr}?apiKey=freekey")
-    if data_t and 'tokens' in data_t:
-        for t in data_t['tokens']:
-            bal = float(t['balance']) / (10 ** int(t['tokenInfo']['decimals']))
-            if bal > 0: results.append((f"TOKEN_{t['tokenInfo']['symbol']} ({label})", addr, bal))
+        results.append((f"{network} ({label})", addr, data["balance"] / 10**18))
+    
+    # Tokens (Apenas para ETH via Ethplorer)
+    if network == "ETH":
+        data_t = await _fetch_json(session, "get", f"https://api.ethplorer.io/getAddressInfo/{addr}?apiKey=freekey")
+        if data_t and 'tokens' in data_t:
+            for t in data_t['tokens']:
+                bal = float(t['balance']) / (10 ** int(t['tokenInfo']['decimals']))
+                if bal > 0: results.append((f"TOKEN_{t['tokenInfo']['symbol']} ({label})", addr, bal))
     return results
 
 async def check_trx_full(session, label, addr):
@@ -88,9 +86,11 @@ async def check_trx_full(session, label, addr):
     if data and data.get('data'):
         acc = data['data'][0]
         if acc.get('balance', 0) > 0: results.append((f"TRX ({label})", addr, acc['balance'] / 10**6))
+        usdt_contract = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
         for t in acc.get('trc20', []):
-            for _, val in t.items():
-                if float(val) > 0: results.append((f"TRC20_TOKEN ({label})", addr, float(val)/10**6))
+            for contract, val in t.items():
+                symbol = "USDT" if contract == usdt_contract else "TRC20_TOKEN"
+                if float(val) > 0: results.append((f"{symbol} ({label})", addr, float(val)/10**6))
     return results
 
 async def check_sol_full(session, label, addr):
@@ -100,13 +100,15 @@ async def check_sol_full(session, label, addr):
     data = await _fetch_json(session, "post", "https://api.mainnet-beta.solana.com", json=p)
     if data and data.get('result', {}).get('value', 0) > 0:
         results.append((f"SOL ({label})", addr, data['result']['value'] / 10**9))
+    # Tokens
+    p_t = {"jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner", "params": [addr, {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}, {"encoding": "jsonParsed"}]}
+    data_t = await _fetch_json(session, "post", "https://api.mainnet-beta.solana.com", json=p_t)
+    if data_t and 'result' in data_t:
+        for acc in data_t['result']['value']:
+            info = acc['account']['data']['parsed']['info']
+            bal = float(info['tokenAmount']['uiAmount'])
+            if bal > 0: results.append((f"SPL_TOKEN ({label})", addr, bal))
     return results
-
-async def check_ltc(session, label, addr):
-    data = await _fetch_json(session, "get", f"https://api.blockcypher.com/v1/ltc/main/addrs/{addr}/balance")
-    if data and data.get("balance", 0) > 0:
-        return (f"LTC ({label})", addr, data["balance"] / 10**8)
-    return None
 
 async def check_balance_all(seed):
     seed = seed.strip()
@@ -118,11 +120,10 @@ async def check_balance_all(seed):
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = []
         for coin, label, addr in addr_map:
-            if coin == "BTC": tasks.append(check_btc(session, coin, label, addr))
-            elif coin == "ETH": tasks.append(check_eth_full(session, label, addr))
+            if coin == "BTC": tasks.append(check_btc(session, label, addr))
+            elif coin in ("ETH", "BSC"): tasks.append(check_eth_evm(session, coin, label, addr))
             elif coin == "TRX": tasks.append(check_trx_full(session, label, addr))
             elif coin == "SOL": tasks.append(check_sol_full(session, label, addr))
-            elif coin == "LTC": tasks.append(check_ltc(session, label, addr))
         
         try:
             raw = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=SEED_TIMEOUT)
