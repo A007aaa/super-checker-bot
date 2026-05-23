@@ -1,9 +1,2 @@
 python-telegram-bot
-requests
-ecdsa
-base58
-mnemonic
-pynacl
-pycryptodome
-bip-utils
 aiohttp
