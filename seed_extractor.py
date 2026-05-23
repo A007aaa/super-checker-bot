@@ -3,77 +3,65 @@ from mnemonic import Mnemonic
 
 class SeedExtractor:
     def __init__(self):
-        self.bip39_list = set(Mnemonic("english").wordlist)
+        self.mnemo = Mnemonic("english")
+        self.wordlist = set(self.mnemo.wordlist)
         self.lengths = [24, 21, 18, 15, 12]
     
-    def extract_seeds_from_text(self, text):
-        words = re.findall(r'\b[a-z]+\b', text.lower())
-        return self._find_seeds_in_words(words)
-    
-    def extract_seeds_from_joined(self, text):
-        text = text.lower()
-        seeds = []
+    def is_valid_bip39(self, seed):
+        """Verifica se a frase é uma seed BIP39 válida (incluindo checksum)."""
+        return self.mnemo.check(seed)
+
+    def extract_all_seeds(self, text):
+        if not text: return []
         
-        for length in self.lengths:
-            seeds.extend(self._find_joined_seeds(text, length))
+        # Limpeza inicial: converter para minúsculas e remover caracteres estranhos, mantendo apenas letras e espaços
+        clean_text = re.sub(r'[^a-z\s]', ' ', text.lower())
+        words = clean_text.split()
         
-        return list(set(seeds))
-    
-    def _find_joined_seeds(self, text, length):
-        seeds = []
+        found_seeds = []
         
-        for start in range(len(text)):
-            words = []
-            pos = start
-            
-            while len(words) < length and pos < len(text):
-                found = False
-                
-                for word_len in range(3, 16):
-                    if pos + word_len <= len(text):
-                        potential_word = text[pos:pos + word_len]
-                        
-                        if potential_word in self.bip39_list:
-                            words.append(potential_word)
-                            pos += word_len
-                            found = True
-                            break
-                
-                if not found:
-                    break
-            
-            if len(words) == length:
-                seed = " ".join(words)
-                if seed not in seeds:
-                    seeds.append(seed)
-        
-        return seeds
-    
-    def _find_seeds_in_words(self, words):
-        potential_seeds = []
-        
+        # 1. Busca por sequências de palavras válidas (Método Deslizante)
         for length in self.lengths:
             for i in range(len(words) - length + 1):
                 segment = words[i:i + length]
-                
-                if all(word in self.bip39_list for word in segment):
+                # Verifica se todas as palavras do segmento estão na wordlist BIP39
+                if all(word in self.wordlist for word in segment):
                     seed = " ".join(segment)
-                    if seed not in potential_seeds:
-                        potential_seeds.append(seed)
+                    if self.is_valid_bip39(seed):
+                        found_seeds.append(seed)
         
-        return potential_seeds
-    
-    def extract_all_seeds(self, text):
+        # 2. Busca por seeds "grudadas" (sem espaços)
+        # Este método é mais lento, então usamos apenas se o texto for pequeno ou se não acharmos nada
+        if not found_seeds and len(text) < 5000:
+            found_seeds.extend(self._extract_joined(text.lower()))
+            
+        # Remover duplicatas mantendo a ordem
+        seen = set()
+        return [x for x in found_seeds if not (x in seen or seen.add(x))]
+
+    def _extract_joined(self, text):
+        # Remove tudo que não for letra
+        text = re.sub(r'[^a-z]', '', text)
         seeds = []
         
-        seeds.extend(self.extract_seeds_from_text(text))
-        seeds.extend(self.extract_seeds_from_joined(text))
-        
-        seen = set()
-        unique_seeds = []
-        for seed in seeds:
-            if seed not in seen:
-                seen.add(seed)
-                unique_seeds.append(seed)
-        
-        return unique_seeds
+        for length in self.lengths:
+            for start in range(len(text)):
+                words = []
+                pos = start
+                while len(words) < length and pos < len(text):
+                    found_word = False
+                    # BIP39 words têm entre 3 e 8 letras
+                    for l in range(8, 2, -1):
+                        word = text[pos:pos+l]
+                        if word in self.wordlist:
+                            words.append(word)
+                            pos += l
+                            found_word = True
+                            break
+                    if not found_word: break
+                
+                if len(words) == length:
+                    seed = " ".join(words)
+                    if self.is_valid_bip39(seed):
+                        seeds.append(seed)
+        return seeds
