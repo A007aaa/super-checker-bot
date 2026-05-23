@@ -7,22 +7,12 @@ class SeedExtractor:
         self.wordlist = set(self.mnemo.wordlist)
         self.lengths = [24, 21, 18, 15, 12]
     
-    def check_seed(self, seed):
-        """Retorna (is_valid, error_msg)"""
-        words = seed.split()
-        if len(words) not in self.lengths:
-            return False, f"Tamanho inválido ({len(words)} palavras)"
-        
-        # Verificar se todas as palavras existem na lista BIP39
-        for w in words:
-            if w not in self.wordlist:
-                return False, f"Palavra inválida: {w}"
-        
-        # Verificar Checksum
-        if not self.mnemo.check(seed):
-            return False, "Checksum inválido (frase incorreta)"
-            
-        return True, "OK"
+    def is_valid_bip39(self, seed):
+        """Verifica se a frase é uma seed BIP39 válida (incluindo checksum)."""
+        try:
+            return self.mnemo.check(seed)
+        except:
+            return False
 
     def extract_all_seeds(self, text):
         if not text: return []
@@ -31,21 +21,20 @@ class SeedExtractor:
         clean_text = re.sub(r'[^a-z\s]', ' ', text.lower())
         words = clean_text.split()
         
-        found_raw = []
+        found_seeds = []
         
-        # Busca por sequências de palavras da wordlist
+        # Busca por sequências de palavras válidas (Janela Deslizante)
+        # Este método é muito mais preciso para listas grandes
         for length in self.lengths:
             for i in range(len(words) - length + 1):
                 segment = words[i:i + length]
+                # Verifica se todas as palavras do segmento estão na wordlist BIP39
                 if all(word in self.wordlist for word in segment):
-                    found_raw.append(" ".join(segment))
+                    seed = " ".join(segment)
+                    # SÓ ADICIONA SE O CHECKSUM FOR VÁLIDO
+                    if self.is_valid_bip39(seed):
+                        found_seeds.append(seed)
         
-        # Remover duplicatas
+        # Remover duplicatas mantendo a ordem
         seen = set()
-        unique = []
-        for s in found_raw:
-            if s not in seen:
-                seen.add(s)
-                unique.append(s)
-        
-        return unique
+        return [x for x in found_seeds if not (x in seen or seen.add(x))]
