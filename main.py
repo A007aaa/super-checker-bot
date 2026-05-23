@@ -2,6 +2,7 @@ import os
 import logging
 import tempfile
 import asyncio
+import re
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from blockchain_checker import check_balance_all
@@ -13,76 +14,81 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGEOY6H0Bo_mgvbymAJ-vWdmH08GMIQGnM')
 extractor = SeedExtractor()
 
+# Dicionário para armazenar as palavras acumuladas por usuário
+user_word_pools = {}
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🚀 **Super Checker Verboso Ativado!**\n\nAgora eu vou te avisar sobre cada seed que eu encontrar, mesmo que o saldo seja zero, para você saber que estou trabalhando.")
+    await update.message.reply_text(
+        "📥 **Modo Coletor Ativado!**\n\n"
+        "1. Envie quantos arquivos .txt ou textos quiser.\n"
+        "2. Eu vou juntar todas as palavras em um único grupo.\n"
+        "3. Quando terminar, digite /check para eu procurar todas as combinações de seeds.\n"
+        "4. Use /clear para limpar sua lista de palavras."
+    )
 
-async def process_single_seed(seed, update):
-    # Validar a seed antes de testar saldo
-    is_valid, reason = extractor.check_seed(seed)
-    if not is_valid:
-        await update.message.reply_text(f"⚠️ **Seed Inválida:** `{seed[:20]}...`\nMotivo: {reason}")
-        return False
+async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    user_word_pools[user_id] = []
+    await update.message.reply_text("🗑️ Sua lista de palavras foi limpa.")
 
-    try:
-        res = await check_balance_all(seed)
-        if res:
-            seed, found = res
-            msg = f"🎯 **SALDO ENCONTRADO!**\n\n🔑 **Seed:** `{seed}`\n"
-            for c, a, b in found:
-                msg += f"• {c}: {b} (Addr: `{a}`)\n"
-            await update.message.reply_text(msg, parse_mode='Markdown')
-            return True
-        else:
-            # Feedback mesmo se não houver saldo (apenas para mensagens diretas)
-            await update.message.reply_text(f"✅ Seed lida: `{seed[:15]}...` | Saldo: 0")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erro ao processar `{seed[:15]}...`: {str(e)}")
-    return False
-
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    doc = update.message.document
-    status_msg = await update.message.reply_text("⏳ Baixando e extraindo seeds...")
-    file = await context.bot.get_file(doc.file_id)
+async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    words = user_word_pools.get(user_id, [])
     
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        await file.download_to_drive(tmp.name)
-        with open(tmp.name, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-    os.unlink(tmp.name)
+    if not words:
+        await update.message.reply_text("❌ Você ainda não enviou nenhuma palavra. Envie arquivos .txt primeiro!")
+        return
 
-    seeds = extractor.extract_all_seeds(content)
+    full_text = " ".join(words)
+    seeds = extractor.extract_all_seeds(full_text)
     total = len(seeds)
-    await status_msg.edit_text(f"📦 Encontradas {total} seeds. Iniciando verificação...")
+    
+    status_msg = await update.message.reply_text(f"⚡ Encontradas {total} combinações de seeds. Iniciando verificação universal...")
 
     found_count = 0
     for i, seed in enumerate(seeds):
-        # Para arquivos grandes, não enviamos mensagem de "saldo 0" para cada uma para não ser banido pelo Telegram
         res = await check_balance_all(seed)
         if res:
             found_count += 1
             seed, found = res
-            msg = f"🎯 **ACHADO NO ARQUIVO!**\nSeed: `{seed}`\n"
+            msg = f"🎯 **ACHADO!**\nSeed: `{seed}`\n"
             for c, a, b in found: msg += f"• {c}: {b}\n"
             await update.message.reply_text(msg, parse_mode='Markdown')
         
-        if (i + 1) % 10 == 0:
+        if (i + 1) % 20 == 0:
             await status_msg.edit_text(f"⏳ Progresso: {i+1}/{total} | Encontradas: {found_count}")
 
-    await update.message.reply_text(f"✅ Fim do arquivo. Total: {total} | Encontradas: {found_count}")
+    await update.message.reply_text(f"✅ Verificação concluída!\nTotal de seeds testadas: {total}\nSaldos encontrados: {found_count}")
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    seeds = extractor.extract_all_seeds(update.message.text)
-    if not seeds:
-        await update.message.reply_text("❌ Nenhuma seed válida encontrada no texto.")
-        return
-    for seed in seeds:
-        await process_single_seed(seed, update)
+async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id not in user_word_pools:
+        user_word_pools[user_id] = []
+
+    text = ""
+    if update.message.document:
+        doc = update.message.document
+        file = await context.bot.get_file(doc.file_id)
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
+            with open(tmp.name, 'r', encoding='utf-8', errors='ignore') as f:
+                text = f.read()
+        os.unlink(tmp.name)
+    else:
+        text = update.message.text
+
+    # Extrair apenas palavras (letras) e adicionar ao pool
+    new_words = re.findall(r'\b[a-z]+\b', text.lower())
+    user_word_pools[user_id].extend(new_words)
+    
+    await update.message.reply_text(f"📥 Adicionadas {len(new_words)} palavras. Total acumulado: {len(user_word_pools[user_id])} palavras.\n\nEnvie mais ou digite /check para começar.")
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CommandHandler("check", check_pool))
+    app.add_handler(CommandHandler("clear", clear_pool))
+    app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_input))
     app.run_polling()
 
 if __name__ == "__main__":
