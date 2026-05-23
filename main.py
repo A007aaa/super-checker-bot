@@ -13,14 +13,16 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGEOY6H0Bo_mgvbymAJ-vWdmH08GMIQGnM')
 extractor = SeedExtractor()
 
-# Limite de seeds processadas simultaneamente para não travar o servidor
-MAX_PARALLEL_SEEDS = 10
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🚀 **Super Checker Ativado!**\n\nEnvie arquivos .txt com milhares de seeds. Eu vou processar tudo em paralelo e te avisar se encontrar saldo em qualquer rede!")
+    await update.message.reply_text("🚀 **Super Checker Verboso Ativado!**\n\nAgora eu vou te avisar sobre cada seed que eu encontrar, mesmo que o saldo seja zero, para você saber que estou trabalhando.")
 
-async def process_seed_and_notify(seed, update):
-    """Processa uma única seed e notifica se encontrar saldo."""
+async def process_single_seed(seed, update):
+    # Validar a seed antes de testar saldo
+    is_valid, reason = extractor.check_seed(seed)
+    if not is_valid:
+        await update.message.reply_text(f"⚠️ **Seed Inválida:** `{seed[:20]}...`\nMotivo: {reason}")
+        return False
+
     try:
         res = await check_balance_all(seed)
         if res:
@@ -30,17 +32,16 @@ async def process_seed_and_notify(seed, update):
                 msg += f"• {c}: {b} (Addr: `{a}`)\n"
             await update.message.reply_text(msg, parse_mode='Markdown')
             return True
+        else:
+            # Feedback mesmo se não houver saldo (apenas para mensagens diretas)
+            await update.message.reply_text(f"✅ Seed lida: `{seed[:15]}...` | Saldo: 0")
     except Exception as e:
-        logger.error(f"Erro ao processar seed: {e}")
+        await update.message.reply_text(f"❌ Erro ao processar `{seed[:15]}...`: {str(e)}")
     return False
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     doc = update.message.document
-    if not doc.file_name.endswith('.txt'):
-        await update.message.reply_text("❌ Por favor, envie apenas arquivos .txt")
-        return
-
-    status_msg = await update.message.reply_text("⏳ Baixando arquivo...")
+    status_msg = await update.message.reply_text("⏳ Baixando e extraindo seeds...")
     file = await context.bot.get_file(doc.file_id)
     
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -51,38 +52,31 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     seeds = extractor.extract_all_seeds(content)
     total = len(seeds)
-    
-    if total == 0:
-        await status_msg.edit_text("❌ Nenhuma seed válida encontrada no arquivo.")
-        return
+    await status_msg.edit_text(f"📦 Encontradas {total} seeds. Iniciando verificação...")
 
-    await status_msg.edit_text(f"⚡ **Iniciando processamento paralelo...**\nTotal: {total} seeds encontradas.\n\nIsso pode levar algum tempo dependendo do tamanho da lista.")
-
-    # Processamento em lotes (Parallel Processing)
     found_count = 0
-    for i in range(0, total, MAX_PARALLEL_SEEDS):
-        batch = seeds[i:i + MAX_PARALLEL_SEEDS]
-        tasks = [process_seed_and_notify(seed, update) for seed in batch]
-        results = await asyncio.gather(*tasks)
-        found_count += sum(1 for r in results if r)
+    for i, seed in enumerate(seeds):
+        # Para arquivos grandes, não enviamos mensagem de "saldo 0" para cada uma para não ser banido pelo Telegram
+        res = await check_balance_all(seed)
+        if res:
+            found_count += 1
+            seed, found = res
+            msg = f"🎯 **ACHADO NO ARQUIVO!**\nSeed: `{seed}`\n"
+            for c, a, b in found: msg += f"• {c}: {b}\n"
+            await update.message.reply_text(msg, parse_mode='Markdown')
         
-        # Atualiza o status a cada lote
-        if (i + MAX_PARALLEL_SEEDS) % 50 == 0 or (i + MAX_PARALLEL_SEEDS) >= total:
-            progress = min(i + MAX_PARALLEL_SEEDS, total)
-            await status_msg.edit_text(f"⏳ **Progresso:** {progress}/{total} seeds verificadas.\n🎯 **Encontradas:** {found_count}")
+        if (i + 1) % 10 == 0:
+            await status_msg.edit_text(f"⏳ Progresso: {i+1}/{total} | Encontradas: {found_count}")
 
-    await update.message.reply_text(f"✅ **Processamento Concluído!**\nTotal verificado: {total}\nSaldos encontrados: {found_count}")
+    await update.message.reply_text(f"✅ Fim do arquivo. Total: {total} | Encontradas: {found_count}")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     seeds = extractor.extract_all_seeds(update.message.text)
     if not seeds:
-        await update.message.reply_text("❌ Nenhuma seed válida encontrada.")
+        await update.message.reply_text("❌ Nenhuma seed válida encontrada no texto.")
         return
-    
-    await update.message.reply_text(f"⏳ Verificando {len(seeds)} seeds...")
     for seed in seeds:
-        await process_seed_and_notify(seed, update)
-    await update.message.reply_text("✅ Verificação concluída.")
+        await process_single_seed(seed, update)
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
