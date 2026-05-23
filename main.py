@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGEOY6H0Bo_mgvbymAJ-vWdmH08GMIQGnM')
 extractor = SeedExtractor()
 
+# Armazenar arquivos temporariamente por usuário
+user_files = {}
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "🔐 **Bot de Verificação de Seed Phrases**\n\n"
@@ -27,8 +30,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  • Tron (TRX)\n\n"
         "Você pode enviar:\n"
         "  • Texto direto\n"
-        "  • Um arquivo .txt\n"
-        "  • VÁRIOS arquivos .txt de uma vez\n\n"
+        "  • VÁRIOS arquivos .txt de uma vez\n"
+        "  • Depois envie /processar para analisar todos\n\n"
         "⏳ Isso pode levar vários minutos para listas grandes...",
         parse_mode='Markdown'
     )
@@ -43,26 +46,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await process_seeds(update, text)
 
 async def handle_documents(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Acumula múltiplos arquivos .txt"""
     doc = update.message.document
+    user_id = update.effective_user.id
     
     if not doc.file_name.endswith('.txt'):
         await update.message.reply_text("❌ Envie arquivo(s) .txt")
         return
     
     try:
+        # Inicializar lista de arquivos do usuário se não existir
+        if user_id not in user_files:
+            user_files[user_id] = []
+        
+        # Baixar arquivo
         file = await context.bot.get_file(doc.file_id)
         with tempfile.NamedTemporaryFile(delete=False, suffix='.txt') as tmp:
             await file.download_to_drive(tmp.name)
             with open(tmp.name, 'r', encoding='utf-8', errors='ignore') as f:
-                text = f.read()
+                content = f.read()
         os.unlink(tmp.name)
         
-        await process_seeds(update, text)
+        # Armazenar conteúdo
+        user_files[user_id].append(content)
+        
+        await update.message.reply_text(
+            f"✅ Arquivo '{doc.file_name}' recebido!\n\n"
+            f"📁 Total de arquivos: {len(user_files[user_id])}\n\n"
+            "Envie mais arquivos ou digite /processar para analisar todos"
+        )
     except Exception as e:
         logger.error(f"Erro ao processar arquivo: {e}")
         await update.message.reply_text(f"❌ Erro ao processar arquivo: {str(e)}")
 
+async def process_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Processa todos os arquivos acumulados"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_files or not user_files[user_id]:
+        await update.message.reply_text("❌ Nenhum arquivo foi enviado. Envie arquivos .txt primeiro.")
+        return
+    
+    # Juntar todo o conteúdo
+    combined_text = "\n".join(user_files[user_id])
+    
+    # Limpar arquivos do usuário
+    del user_files[user_id]
+    
+    await process_seeds(update, combined_text)
+
 async def process_seeds(update: Update, text: str) -> None:
+    """Processa seeds do texto"""
     seeds = extractor.extract_all_seeds(text)
     
     if not seeds:
@@ -108,6 +142,7 @@ async def process_seeds(update: Update, text: str) -> None:
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("processar", process_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_documents))
     app.run_polling()
