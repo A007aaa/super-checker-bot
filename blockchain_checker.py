@@ -6,18 +6,18 @@ from bip_utils import (
     Bip49, Bip49Coins, Bip84, Bip84Coins, Bip39MnemonicValidator
 )
 
-# ── Safe Mode Tunables ──────────────────────────────────────────────────────
-REQUEST_TIMEOUT   = 15          
-SEED_TIMEOUT      = 120         
-MAX_CONCURRENT_REQUESTS = 5     # Reduzido para evitar bloqueios de API em listas grandes
-CHECK_INDEX_COUNT = 3           
+# ── Super Turbo Tunables ────────────────────────────────────────────────────
+REQUEST_TIMEOUT   = 8           # Timeouts curtos para não travar
+SEED_TIMEOUT      = 45          
+MAX_CONCURRENT_REQUESTS = 30    # Alta concorrência
+CHECK_INDEX_COUNT = 2           # Foco nos 2 primeiros endereços (95% dos casos)
 HEADERS = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
 
+# Múltiplos RPCs para evitar bloqueios
 RPC_URLS = {
-    "BSC": "https://bsc-dataseed.binance.org/",
-    "POLYGON": "https://polygon-rpc.com/",
-    "ETH": "https://cloudflare-eth.com/",
-    "SOL": "https://api.mainnet-beta.solana.com"
+    "BSC": ["https://bsc-dataseed.binance.org/", "https://bsc-dataseed1.defibit.io/"],
+    "POLYGON": ["https://polygon-rpc.com/", "https://rpc-mainnet.maticvigil.com/"],
+    "ETH": ["https://cloudflare-eth.com/", "https://eth-mainnet.public.blastapi.io"]
 }
 
 USDT_CONTRACTS = {
@@ -29,14 +29,16 @@ USDT_CONTRACTS = {
 
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
-async def _rpc_call(session, url, method, params):
+async def _rpc_call(session, urls, method, params):
     async with semaphore:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        try:
-            async with session.post(url, json=payload, timeout=REQUEST_TIMEOUT) as res:
-                if res.status == 200: return await res.json()
-                if res.status == 429: await asyncio.sleep(5) # Espera se for bloqueado
-        except: pass
+        for url in urls:
+            try:
+                async with session.post(url, json=payload, timeout=REQUEST_TIMEOUT) as res:
+                    if res.status == 200:
+                        data = await res.json()
+                        if 'result' in data: return data
+            except: continue
         return None
 
 async def get_universal_addresses(seed_phrase):
@@ -44,7 +46,7 @@ async def get_universal_addresses(seed_phrase):
         seed_bytes = Bip39SeedGenerator(seed_phrase).Generate()
         addr_map = []
         for i in range(CHECK_INDEX_COUNT):
-            # BTC
+            # BTC (SegWit & Native)
             try:
                 addr_map.append(("BTC", f"SegWit_#{i}", Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
                 addr_map.append(("BTC", f"Native_#{i}", Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
@@ -69,15 +71,13 @@ async def check_btc(session, label, addr):
                     data = await res.json()
                     bal = data.get(addr, {}).get("final_balance", 0) / 10**8
                     if bal > 0: return (f"BTC ({label})", addr, bal)
-                if res.status == 429: await asyncio.sleep(2)
         except: pass
         return None
 
 async def check_evm_full(session, label, addr):
     results = []
-    for net, url in RPC_URLS.items():
-        if net == "SOL": continue
-        data = await _rpc_call(session, url, "eth_getBalance", [addr, "latest"])
+    for net, urls in RPC_URLS.items():
+        data = await _rpc_call(session, urls, "eth_getBalance", [addr, "latest"])
         if data and 'result' in data:
             bal = int(data['result'], 16) / 10**18
             if bal > 0.0001: results.append((f"{net} ({label})", addr, bal))
@@ -85,7 +85,7 @@ async def check_evm_full(session, label, addr):
         contract = USDT_CONTRACTS.get(net)
         if contract:
             call_data = "0x70a08231" + addr[2:].zfill(64)
-            t_data = await _rpc_call(session, url, "eth_call", [{"to": contract, "data": call_data}, "latest"])
+            t_data = await _rpc_call(session, urls, "eth_call", [{"to": contract, "data": call_data}, "latest"])
             if t_data and 'result' in t_data and t_data['result'] != '0x':
                 t_bal = int(t_data['result'], 16) / 10**6
                 if t_bal > 0.1: results.append((f"USDT_{net} ({label})", addr, t_bal))
@@ -111,9 +111,7 @@ async def check_trx(session, label, addr):
 
 async def check_balance_all(seed):
     seed = seed.strip()
-    # AQUI ESTÁ O FILTRO: Só processa se a seed for válida
     if not seed or not Bip39MnemonicValidator().IsValid(seed): return None
-    
     addr_map = await get_universal_addresses(seed)
     if not addr_map: return None
 
