@@ -4,16 +4,19 @@ import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from blockchain_checker import check_seed_balance
+from seed_extractor import SeedExtractor
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGEOY6H0Bo_mgvbymAJ-vWdmH08GMIQGnM')
+extractor = SeedExtractor()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "🔐 **Bot de Verificação de Seed Phrase**\n\n"
-        "Envie uma seed phrase (12 ou 24 palavras) e vou:\n"
+        "🔐 **Bot de Verificação de Seed Phrases**\n\n"
+        "Envie uma lista com múltiplas seed phrases e vou:\n"
+        "✅ Extrair todas as seeds (mesmo juntas)\n"
         "✅ Gerar todos os endereços possíveis\n"
         "✅ Verificar saldo em:\n"
         "  • Bitcoin (Legacy, SegWit, Native)\n"
@@ -21,47 +24,62 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  • BSC (BNB)\n"
         "  • Polygon (MATIC)\n"
         "  • Tron (TRX)\n\n"
-        "⏳ Isso pode levar alguns minutos...",
+        "⏳ Isso pode levar vários minutos para listas grandes...",
         parse_mode='Markdown'
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    seed_phrase = update.message.text.strip()
+    text = update.message.text.strip()
     
-    if not seed_phrase:
-        await update.message.reply_text("❌ Envie uma seed phrase válida.")
+    if not text:
+        await update.message.reply_text("❌ Envie um texto com seed phrases.")
         return
     
-    # Validar se parece uma seed phrase
-    words = seed_phrase.split()
-    if len(words) not in [12, 24]:
-        await update.message.reply_text("❌ Seed phrase deve ter 12 ou 24 palavras.")
+    # Extrair todas as seeds do texto
+    seeds = extractor.extract_all_seeds(text)
+    
+    if not seeds:
+        await update.message.reply_text("❌ Nenhuma seed phrase válida encontrada.")
         return
     
-    await update.message.reply_text("⏳ Analisando seed phrase... Isso pode levar alguns minutos.")
+    await update.message.reply_text(f"⏳ Encontradas {len(seeds)} seed(s). Analisando... Isso pode levar alguns minutos.")
     
-    result = await check_seed_balance(seed_phrase)
+    # Verificar cada seed
+    results = []
+    for i, seed in enumerate(seeds, 1):
+        logger.info(f"Verificando seed {i}/{len(seeds)}: {seed[:30]}...")
+        result = await check_seed_balance(seed)
+        if result:
+            results.append(result)
     
-    if result:
-        seed, balances = result
-        msg = "✅ **SALDOS ENCONTRADOS!**\n\n"
+    if results:
+        msg = f"✅ **SALDOS ENCONTRADOS EM {len(results)} SEED(S)!**\n\n"
         
-        # Agrupar por moeda
-        by_coin = {}
-        for coin, addr, bal in balances:
-            if coin not in by_coin:
-                by_coin[coin] = []
-            by_coin[coin].append((addr, bal))
-        
-        for coin in sorted(by_coin.keys()):
-            msg += f"💰 **{coin}**\n"
-            for addr, bal in by_coin[coin]:
-                msg += f"  • `{addr[:20]}...` → {bal:.8f}\n"
+        for seed_idx, (seed, balances) in enumerate(results, 1):
+            msg += f"🔐 **Seed #{seed_idx}:** `{seed[:40]}...`\n"
+            
+            # Agrupar por moeda
+            by_coin = {}
+            for coin, addr, bal in balances:
+                if coin not in by_coin:
+                    by_coin[coin] = []
+                by_coin[coin].append((addr, bal))
+            
+            for coin in sorted(by_coin.keys()):
+                msg += f"  💰 **{coin}**\n"
+                for addr, bal in by_coin[coin]:
+                    msg += f"    • `{addr[:20]}...` → {bal:.8f}\n"
             msg += "\n"
         
-        await update.message.reply_text(msg, parse_mode='Markdown')
+        # Dividir mensagem se ficar muito grande
+        if len(msg) > 4000:
+            chunks = [msg[i:i+4000] for i in range(0, len(msg), 4000)]
+            for chunk in chunks:
+                await update.message.reply_text(chunk, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(msg, parse_mode='Markdown')
     else:
-        await update.message.reply_text("ℹ️ Nenhum saldo encontrado nesta seed phrase.")
+        await update.message.reply_text(f"ℹ️ Analisadas {len(seeds)} seed(s), mas nenhum saldo foi encontrado.")
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
