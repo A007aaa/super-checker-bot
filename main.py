@@ -15,19 +15,27 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGEOY6H0Bo_mgv
 extractor = SeedExtractor()
 
 user_word_pools = {}
+MAX_PARALLEL_SEEDS = 25 # Aumentado para 25 seeds simultâneas
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "🚀 **Super Checker Estável Ativado!**\n\n"
-        "1. Envie seus arquivos .txt ou textos.\n"
-        "2. Digite /check para processar tudo.\n"
-        "3. Use /clear para limpar a memória."
-    )
+    await update.message.reply_text("🚀 **MODO TURBO ATIVADO!** ⚡\n\nEnvie seus arquivos e use /check. Agora estou processando 25 seeds simultaneamente com alta concorrência.")
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     user_word_pools[user_id] = []
     await update.message.reply_text("🗑️ Memória limpa.")
+
+async def process_seed_silent(seed, update):
+    try:
+        res = await check_balance_all(seed)
+        if res:
+            seed, found = res
+            msg = f"🎯 **SALDO ENCONTRADO!**\nSeed: `{seed}`\n"
+            for c, a, b in found: msg += f"• {c}: {b}\n"
+            await update.message.reply_text(msg, parse_mode='Markdown')
+            return True
+    except: pass
+    return False
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -40,26 +48,23 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     seeds = extractor.extract_all_seeds(full_text)
     total = len(seeds)
     
-    status_msg = await update.message.reply_text(f"⚡ Verificando {total} combinações...")
+    status_msg = await update.message.reply_text(f"⚡ **MODO TURBO:** Verificando {total} combinações...")
 
     found_count = 0
-    for i, seed in enumerate(seeds):
-        try:
-            res = await check_balance_all(seed)
-            if res:
-                found_count += 1
-                seed, found = res
-                msg = f"🎯 **ACHADO!**\nSeed: `{seed}`\n"
-                for c, a, b in found: msg += f"• {c}: {b}\n"
-                await update.message.reply_text(msg, parse_mode='Markdown')
-            
-            if (i + 1) % 50 == 0:
-                await status_msg.edit_text(f"⏳ Progresso: {i+1}/{total} | Encontradas: {found_count}")
-                await asyncio.sleep(1) # Evita 429 do Telegram
-        except Exception as e:
-            logger.error(f"Erro: {e}")
+    for i in range(0, total, MAX_PARALLEL_SEEDS):
+        batch = seeds[i:i + MAX_PARALLEL_SEEDS]
+        tasks = [process_seed_silent(seed, update) for seed in batch]
+        results = await asyncio.gather(*tasks)
+        found_count += sum(1 for r in results if r)
+        
+        if (i + MAX_PARALLEL_SEEDS) % 100 == 0 or (i + MAX_PARALLEL_SEEDS) >= total:
+            progress = min(i + MAX_PARALLEL_SEEDS, total)
+            try:
+                await status_msg.edit_text(f"🚀 **Turbo:** {progress}/{total} | 🎯 **Achados:** {found_count}")
+            except: pass
+            await asyncio.sleep(0.5)
 
-    await update.message.reply_text(f"✅ Concluído! Total: {total} | Encontradas: {found_count}")
+    await update.message.reply_text(f"✅ **FIM DO TURBO!**\nTotal: {total}\nEncontradas: {found_count}")
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -78,10 +83,8 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     new_words = re.findall(r'\b[a-z]+\b', text.lower())
     user_word_pools[user_id].extend(new_words)
-    
-    # Resposta silenciosa para evitar 429 se o usuário enviar muitos arquivos
     try:
-        await update.message.reply_text(f"📥 +{len(new_words)} palavras (Total: {len(user_word_pools[user_id])})")
+        await update.message.reply_text(f"📥 +{len(new_words)} (Total: {len(user_word_pools[user_id])})")
     except: pass
 
 def main():
