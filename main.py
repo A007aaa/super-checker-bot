@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from blockchain_checker import check_seed_balance
+from blockchain_checker import check_balance_all
 from seed_extractor import SeedExtractor
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
@@ -70,7 +70,7 @@ async def process_seeds(update: Update, text: str) -> None:
     results = []
     for i, seed in enumerate(seeds, 1):
         logger.info(f"Verificando seed {i}/{len(seeds)}: {seed[:30]}...")
-        result = await check_seed_balance(seed)
+        result = await check_balance_all(seed)
         if result:
             results.append(result)
     
