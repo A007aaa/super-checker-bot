@@ -15,19 +15,26 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGEOY6H0Bo_mgv
 extractor = SeedExtractor()
 
 user_word_pools = {}
+RESULTS_FILE = "achados_com_saldo.txt"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "🚀 **Super Checker Ativado!**\n\n"
-        "1. Envie seus arquivos ou textos.\n"
-        "2. Digite /check para começar.\n"
-        "3. Use /clear para limpar."
+        "🚀 **Super Checker com Backup Ativado!**\n\n"
+        "Agora todos os saldos encontrados serão salvos em um arquivo e enviados para você no final."
     )
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     user_word_pools[user_id] = []
     await update.message.reply_text("🗑️ Memória limpa.")
+
+async def save_result(seed, found_list):
+    """Salva o resultado em um arquivo local para backup."""
+    with open(RESULTS_FILE, "a") as f:
+        f.write(f"SEED: {seed}\n")
+        for c, a, b in found_list:
+            f.write(f" - {c}: {b} (Addr: {a})\n")
+        f.write("-" * 30 + "\n")
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -40,7 +47,7 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     seeds = extractor.extract_all_seeds(full_text)
     total = len(seeds)
     
-    status_msg = await update.message.reply_text(f"⚡ Iniciando verificação de {total} seeds válidas...")
+    status_msg = await update.message.reply_text(f"⚡ Verificando {total} seeds. Resultados serão salvos em arquivo.")
 
     found_count = 0
     for i, seed in enumerate(seeds):
@@ -49,20 +56,32 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             if res:
                 found_count += 1
                 seed, found = res
+                # 1. Salva no arquivo de backup
+                await save_result(seed, found)
+                
+                # 2. Tenta enviar mensagem no Telegram
                 msg = f"🎯 **SALDO ENCONTRADO!**\nSeed: `{seed}`\n"
                 for c, a, b in found: msg += f"• {c}: {b}\n"
-                await update.message.reply_text(msg, parse_mode='Markdown')
-            
-            # Feedback MUITO frequente (a cada 5 seeds)
-            if (i + 1) % 5 == 0 or (i + 1) == total:
                 try:
-                    await status_msg.edit_text(f"⏳ **Processando:** {i+1}/{total}\n🎯 **Encontradas:** {found_count}\n\nO bot está trabalhando, por favor aguarde...")
+                    await update.message.reply_text(msg, parse_mode='Markdown')
+                except:
+                    logger.error(f"Erro ao enviar mensagem de saldo para a seed: {seed}")
+            
+            if (i + 1) % 10 == 0 or (i + 1) == total:
+                try:
+                    await status_msg.edit_text(f"⏳ **Progresso:** {i+1}/{total}\n🎯 **Encontradas:** {found_count}")
                 except: pass
-                await asyncio.sleep(0.5) # Evita 429
+                await asyncio.sleep(0.5)
         except Exception as e:
             logger.error(f"Erro: {e}")
 
-    await update.message.reply_text(f"✅ **Fim da Verificação!**\nTotal testado: {total}\nSaldos encontrados: {found_count}")
+    # Envia o arquivo de resultados no final se houver achados
+    if found_count > 0 and os.path.exists(RESULTS_FILE):
+        await update.message.reply_document(document=open(RESULTS_FILE, 'rb'), caption=f"✅ Verificação concluída! Aqui estão as {found_count} seeds com saldo.")
+        # Opcional: deletar o arquivo após enviar para não acumular para o próximo usuário
+        # os.remove(RESULTS_FILE)
+    else:
+        await update.message.reply_text(f"✅ Fim da verificação. Nenhuma seed com saldo encontrada entre as {total} testadas.")
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -81,7 +100,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     new_words = re.findall(r'\b[a-z]+\b', text.lower())
     user_word_pools[user_id].extend(new_words)
-    await update.message.reply_text(f"📥 +{len(new_words)} palavras (Total: {len(user_word_pools[user_id])})")
+    await update.message.reply_text(f"📥 +{len(new_words)} (Total: {len(user_word_pools[user_id])})")
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
