@@ -1,74 +1,64 @@
 import os
 import logging
-import tempfile
-import time
 import asyncio
-import telegram
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from blockchain_checker import check_balance_all, get_universal_addresses
-from seed_extractor import SeedExtractor
+from blockchain_checker import check_wallet_balance
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGEOY6H0Bo_mgvbymAJ-vWdmH08GMIQGnM')
-extractor = SeedExtractor()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🤖 **Bot de Diagnóstico Ativado**\n\nEnvie uma seed ou arquivo .txt. Eu vou te mostrar os endereços que estou gerando para você conferir com sua carteira.")
+    await update.message.reply_text(
+        "💰 **Bot de Verificação de Saldo**\n\n"
+        "Envie endereços de wallet para verificar saldo:\n"
+        "• Bitcoin (BTC)\n"
+        "• Ethereum (ETH)\n"
+        "• BSC (BNB)\n"
+        "• Polygon (MATIC)\n"
+        "• Tron (TRX)\n\n"
+        "Você pode enviar um endereço por linha ou separados por vírgula.",
+        parse_mode='Markdown'
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
-    seeds = extractor.extract_all_seeds(text)
-    if not seeds:
-        await update.message.reply_text("❌ Nenhuma seed válida encontrada.")
+    text = update.message.text.strip()
+    
+    if not text:
+        await update.message.reply_text("❌ Envie pelo menos um endereço de wallet.")
         return
-
-    for seed in seeds:
-        await update.message.reply_text(f"🔍 **Analisando Seed:** `{seed}`")
-        # Mostrar endereços gerados para conferência
-        addrs = await get_universal_addresses(seed)
-        debug_msg = "📍 **Endereços Gerados (Primeiros de cada rede):**\n"
-        for coin, label, addr in addrs[:5]: # Mostra os 5 primeiros para não inundar o chat
-            debug_msg += f"• {coin} ({label}): `{addr}`\n"
-        await update.message.reply_text(debug_msg, parse_mode='Markdown')
-        
-        # Verificar saldo
-        res = await check_balance_all(seed)
-        if res:
-            seed, found = res
-            msg = "✅ **SALDO ENCONTRADO!**\n"
-            for c, a, b in found: msg += f"• {c}: {b} (Addr: `{a}`)\n"
-            await update.message.reply_text(msg, parse_mode='Markdown')
-        else:
-            await update.message.reply_text("ℹ️ Nenhum saldo encontrado nesses endereços.")
-
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    doc = update.message.document
-    file = await context.bot.get_file(doc.file_id)
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        await file.download_to_drive(tmp.name)
-        with open(tmp.name, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-    os.unlink(tmp.name)
-    # Para arquivos, processamos sem o debug detalhado para não travar o bot
-    seeds = extractor.extract_all_seeds(content)
-    await update.message.reply_text(f"⏳ Processando {len(seeds)} seeds do arquivo...")
-    for seed in seeds:
-        res = await check_balance_all(seed)
-        if res:
-            seed, found = res
-            msg = f"🎯 **ACHADO!**\nSeed: `{seed}`\n"
-            for c, a, b in found: msg += f"• {c}: {b}\n"
-            await update.message.reply_text(msg, parse_mode='Markdown')
-    await update.message.reply_text("✅ Fim do processamento do arquivo.")
+    
+    addresses = [addr.strip() for addr in text.replace(',', '\n').split('\n') if addr.strip()]
+    
+    if not addresses:
+        await update.message.reply_text("❌ Nenhum endereço válido encontrado.")
+        return
+    
+    await update.message.reply_text(f"⏳ Verificando {len(addresses)} endereço(s)...")
+    
+    results = []
+    for addr in addresses:
+        result = await check_wallet_balance(addr)
+        if result:
+            results.append(result)
+    
+    if results:
+        msg = "✅ **RESULTADOS:**\n\n"
+        for addr, balances in results:
+            msg += f"📍 `{addr}`\n"
+            for coin, balance in balances:
+                msg += f"  • {coin}: {balance}\n"
+            msg += "\n"
+        await update.message.reply_text(msg, parse_mode='Markdown')
+    else:
+        await update.message.reply_text("ℹ️ Nenhum saldo encontrado nos endereços verificados.")
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.run_polling()
 
 if __name__ == "__main__":
