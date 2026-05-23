@@ -6,7 +6,6 @@ from bip_utils import (
     Bip49, Bip49Coins, Bip84, Bip84Coins, Bip39MnemonicValidator
 )
 
-# ── Tunables ────────────────────────────────────────────────────────────────
 REQUEST_TIMEOUT   = 20          
 SEED_TIMEOUT      = 180         
 MAX_RETRIES       = 2           
@@ -14,14 +13,12 @@ CHECK_INDEX_COUNT = 5
 MAX_CONCURRENT_REQUESTS = 5     
 HEADERS = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
 
-# RPCs Públicos (Mais confiáveis que APIs de terceiros)
 RPC_URLS = {
     "BSC": "https://bsc-dataseed.binance.org/",
     "POLYGON": "https://polygon-rpc.com/",
     "ETH": "https://cloudflare-eth.com/",
     "SOL": "https://api.mainnet-beta.solana.com"
 }
-# ────────────────────────────────────────────────────────────────────────────
 
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
@@ -39,18 +36,15 @@ async def get_universal_addresses(seed_phrase):
         seed_bytes = Bip39SeedGenerator(seed_phrase).Generate()
         addr_map = []
         for i in range(CHECK_INDEX_COUNT):
-            # BTC
             try:
                 addr_map.append(("BTC", f"Legacy_#{i}", Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
                 addr_map.append(("BTC", f"SegWit_#{i}", Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
                 addr_map.append(("BTC", f"Native_#{i}", Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
             except: pass
-            # EVM
             try:
                 eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
                 addr_map.append(("EVM", f"ADDR_#{i}", eth_addr))
             except: pass
-            # Tron
             try:
                 addr_map.append(("TRX", f"TRX_#{i}", Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
             except: pass
@@ -85,7 +79,6 @@ async def check_trx(session, label, addr):
                     acc = data['data'][0]
                     bal = acc.get('balance', 0) / 10**6
                     if bal > 0: return (f"TRX ({label})", addr, bal)
-                    # Check USDT
                     for t in acc.get('trc20', []):
                         for contract, val in t.items():
                             if contract == 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' and float(val) > 0:
@@ -111,11 +104,12 @@ async def check_balance_all(seed):
         
         try:
             raw = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=SEED_TIMEOUT)
-        except: raw = []
+        except:
+            raw = []
 
     found = []
     for item in raw:
-        if item and not isinstance(item, Exception):
-            if isinstance(item, list): found.extend(item)
-            else: found.append(item)
+        if item is not None and not isinstance(item, Exception):
+            found.append(item)
+    
     return (seed, found) if found else None
