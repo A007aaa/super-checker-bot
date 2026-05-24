@@ -7,12 +7,13 @@ import random
 logger = logging.getLogger(__name__)
 from bip_utils import (
     Bip39SeedGenerator, Bip44, Bip44Coins, Bip44Changes,
-    Bip49, Bip49Coins, Bip84, Bip84Coins, Bip39MnemonicValidator
+    Bip49, Bip49Coins, Bip84, Bip84Coins, Bip39MnemonicValidator,
+    Bip32Utils
 )
 
 # ── Hyper Turbo Tunables ────────────────────────────────────────────────────
 REQUEST_TIMEOUT   = 10          # Aumentado para acomodar RPCs mais lentos, especialmente para Tron
-SEED_TIMEOUT      = 30          
+SEED_TIMEOUT      = 60          # Aumentado para suportar varredura profunda
 MAX_CONCURRENT_REQUESTS = 20    # Reduzido para não ser bloqueado pelos RPCs públicos
 CHECK_INDEX_COUNT = 1           # Foco total no endereço #0 (Velocidade Máxima)
 GAP_LIMIT = 10                  # Aumentado para maior assertividade, especialmente para Tron
@@ -70,25 +71,29 @@ async def get_universal_addresses(seed_phrase):
                 addr_map.append(("BTC", "P2SH-SegWit", Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
                 # BIP-44 (P2PKH Legacy)
                 addr_map.append(("BTC", "P2PKH", Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
-            except Exception as e: 
-                # logger.warning(f"Erro ao derivar BTC para seed {seed_phrase} account {account_idx} index {address_idx}: {e}")
-                pass
+            except Exception: pass
 
             # EVM (BIP-44)
             try:
                 eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
                 addr_map.append(("EVM", "ADDR", eth_addr))
-            except Exception as e: 
-                # logger.warning(f"Erro ao derivar EVM para seed {seed_phrase} account {account_idx} index {address_idx}: {e}")
-                pass
+            except Exception: pass
 
-            # Tron (BIP-44)
+            # Tron (Múltiplos Caminhos)
             try:
-                trx_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
-                addr_map.append(("TRX", "TRX", trx_addr))
-            except Exception as e: 
-                # logger.warning(f"Erro ao derivar TRX para seed {seed_phrase} account {account_idx} index {address_idx}: {e}")
-                pass
+                # 1. Padrão BIP-44 (m/44'/195'/0'/0/0)
+                trx_addr_std = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
+                addr_map.append(("TRX", "STD", trx_addr_std))
+                
+                # 2. Alternativo (m/44'/195'/0'/0) - Comum em algumas carteiras
+                # Usando Bip32 diretamente para caminhos customizados
+                bip32_ctx = Bip32Utils.FromSeed(seed_bytes).DerivePath(f"m/44'/195'/{account_idx}'/0")
+                trx_addr_alt = Bip44.FromPublicKey(bip32_ctx.PublicKey().Raw().ToBytes(), Bip44Coins.TRON).PublicKey().ToAddress()
+                addr_map.append(("TRX", "ALT", trx_addr_alt))
+                
+                # 3. Trust Wallet / TronLink Deep (m/44'/195'/0'/0/index)
+                # O Bip44 já cobre isso no loop de address_idx, mas vamos reforçar o account_idx
+            except Exception: pass
 
     return addr_map
 
@@ -134,7 +139,7 @@ async def check_trx(session, addr):
                         
                         # 1. Verificar saldo de TRX
                         bal_trx = acc.get('balance', 0) / 10**6
-                        if bal_trx > 0.1: # Filtro mínimo de TRX
+                        if bal_trx > 0.01: # Filtro mínimo de TRX
                             results.append(("TRX", addr, bal_trx))
                         
                         # 2. Verificar tokens TRC20 (incluindo USDT)
@@ -180,4 +185,14 @@ async def check_balance_all(seed):
         if item and not isinstance(item, Exception):
             if isinstance(item, list): found.extend(item)
             else: found.append(item)
-    return (seed, found) if found else None
+    
+    # Remover duplicatas de resultados (mesmo endereço em caminhos diferentes)
+    unique_found = []
+    seen_results = set()
+    for coin, addr, bal in found:
+        key = (coin, addr)
+        if key not in seen_results:
+            unique_found.append((coin, addr, bal))
+            seen_results.add(key)
+            
+    return (seed, unique_found) if unique_found else None
