@@ -34,8 +34,10 @@ class SeedExtractor:
 
         # 2. Busca Exaustiva: Janela Deslizante sobre as palavras BIP39
         # Isso cobre o caso onde as palavras da seed estão em sequência, mesmo com lixo entre elas
-        for length in self.lengths:
-            for i in range(len(bip39_words) - length + 1):
+        for i in range(len(bip39_words)):
+            for length in self.lengths:
+                if i + length > len(bip39_words):
+                    break
                 segment = bip39_words[i : i + length]
                 seed_phrase = " ".join(segment)
                 if self.is_valid_bip39(seed_phrase):

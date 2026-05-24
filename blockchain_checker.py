@@ -16,8 +16,8 @@ REQUEST_TIMEOUT   = 15          # Aumentado para acomodar RPCs mais lentos
 SEED_TIMEOUT      = 180         # Aumentado para suportar varredura exaustiva total
 MAX_CONCURRENT_REQUESTS = 10    # Equilíbrio entre velocidade e rate limit
 CHECK_INDEX_COUNT = 1           
-GAP_LIMIT = 10                  
-MAX_ACCOUNTS = 3                
+GAP_LIMIT = 5                  
+MAX_ACCOUNTS = 2                
 HEADERS = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
 
 RPC_URLS = {

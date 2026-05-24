@@ -20,7 +20,7 @@ def get_results_file_path(user_id):
     return f"achados_com_saldo_{user_id}.txt"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🚀 **MODO HYPER TURBO ATIVADO!** ⚡🔥\n\nProcessando 100 seeds simultaneamente. Velocidade máxima de varredura.")
+    await update.message.reply_text("🚀 **MODO HYPER TURBO ATIVADO!** ⚡🔥\n\nEnvie textos ou arquivos com palavras. Use /check para iniciar a verificação e /clear para limpar a lista.")
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -86,6 +86,9 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     text = ""
     if update.message.document:
+        if not update.message.document.file_name.endswith(('.txt', '.log', '.csv')):
+            return 
+
         file = await context.bot.get_file(update.message.document.file_id)
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             await file.download_to_drive(tmp.name)
@@ -95,15 +98,19 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         text = update.message.text
 
-    new_words = re.findall(r'\b[a-z]+\b', text.lower())
+    new_words = re.findall(r'\b[a-z]{3,}\b', text.lower())
     user_word_pools[user_id].extend(new_words)
     try:
         await update.message.reply_text(f"📥 +{len(new_words)} (Total: {len(user_word_pools[user_id])})")
     except Exception as e:
         logger.warning(f"Erro ao enviar mensagem de confirmação de palavras: {e}")
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(f"Exception while handling an update: {context.error}")
+
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check_pool))
     app.add_handler(CommandHandler("clear", clear_pool))
