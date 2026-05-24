@@ -14,7 +14,7 @@ from bip_utils import (
 # ── Hyper Turbo Tunables ────────────────────────────────────────────────────
 REQUEST_TIMEOUT   = 10          # Aumentado para acomodar RPCs mais lentos, especialmente para Tron
 SEED_TIMEOUT      = 60          # Aumentado para suportar varredura profunda
-MAX_CONCURRENT_REQUESTS = 20    # Reduzido para não ser bloqueado pelos RPCs públicos
+MAX_CONCURRENT_REQUESTS = 5     # Reduzido drasticamente para evitar status 429 (Too Many Requests)
 CHECK_INDEX_COUNT = 1           # Foco total no endereço #0 (Velocidade Máxima)
 GAP_LIMIT = 10                  # Aumentado para maior assertividade, especialmente para Tron
 MAX_ACCOUNTS = 3                # Aumentado para maior assertividade
@@ -131,6 +131,8 @@ async def check_trx(session, addr):
         results = []
         try:
             # TronGrid V1 API é excelente para ver saldo de TRX e TRC20 em uma única chamada
+            # Adicionando um pequeno delay aleatório para evitar picos de requisição
+            await asyncio.sleep(random.uniform(0.5, 2.0))
             async with session.get(f"https://api.trongrid.io/v1/accounts/{addr}", timeout=REQUEST_TIMEOUT) as res:
                 if res.status == 200:
                     data = await res.json()

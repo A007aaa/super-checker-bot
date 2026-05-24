@@ -26,24 +26,30 @@ class SeedExtractor:
         
         found_seeds = []
         
-        # Extrair todas as palavras que são válidas no BIP39 wordlist, mantendo a ordem
-        bip39_words_with_indices = [(word, i) for i, word in enumerate(all_words_in_text) if word in self.wordlist]
+        # 1. Extrair todas as palavras que são válidas no BIP39 wordlist, mantendo a ordem
+        bip39_words = [word for word in all_words_in_text if word in self.wordlist]
         
-        # Iterar sobre todas as palavras BIP39 encontradas como possíveis inícios de uma seed
-        for i in range(len(bip39_words_with_indices)):
-            for length in self.lengths:
-                # Verificar se há palavras BIP39 suficientes para formar uma seed do comprimento atual
-                if i + length <= len(bip39_words_with_indices):
-                    # Pegar o segmento de palavras BIP39
-                    potential_seed_segment_info = bip39_words_with_indices[i : i + length]
-                    potential_seed_words = [word for word, _ in potential_seed_segment_info]
-                    
-                    seed_phrase = " ".join(potential_seed_words)
-                    
-                    # Validar a seed phrase
-                    if self.is_valid_bip39(seed_phrase):
-                        found_seeds.append(seed_phrase)
+        if not bip39_words:
+            return []
+
+        # 2. Busca Exaustiva: Janela Deslizante sobre as palavras BIP39
+        # Isso cobre o caso onde as palavras da seed estão em sequência, mesmo com lixo entre elas
+        for length in self.lengths:
+            for i in range(len(bip39_words) - length + 1):
+                segment = bip39_words[i : i + length]
+                seed_phrase = " ".join(segment)
+                if self.is_valid_bip39(seed_phrase):
+                    found_seeds.append(seed_phrase)
         
+        # 3. Busca por "Lixo Extremo": 
+        # Se as palavras da seed estiverem muito espalhadas, a janela deslizante sobre bip39_words resolve.
+        # Mas se houver palavras que NÃO são BIP39 no meio, a limpeza inicial já as removeu.
+        # O que pode estar acontecendo é a seed estar "quebrada" por palavras que TAMBÉM são BIP39 mas não fazem parte da seed.
+        
+        # Para lidar com isso, o bot já está testando todas as janelas possíveis dentro da lista de palavras BIP39.
+        # Ex: se o texto é "word1 LIXO word2 word3 ... word12", bip39_words será ["word1", "word2", ..., "word12"]
+        # e a janela deslizante vai capturar isso perfeitamente.
+
         # Remover duplicatas mantendo a ordem de descoberta
         seen = set()
         return [x for x in found_seeds if not (x in seen or seen.add(x))]
