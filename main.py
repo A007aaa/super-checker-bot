@@ -11,7 +11,7 @@ from seed_extractor import SeedExtractor
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.getenv(\'TELEGRAM_BOT_TOKEN\')
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 extractor = SeedExtractor()
 
 user_word_pools = {}
@@ -76,7 +76,7 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await asyncio.sleep(1)
 
     if found_count > 0 and os.path.exists(get_results_file_path(user_id)):
-        await update.message.reply_document(document=open(get_results_file_path(user_id), \'rb\'), caption=f"✅ Fim do Hyper Turbo! {found_count} achados.")
+        await update.message.reply_document(document=open(get_results_file_path(user_id), 'rb'), caption=f"✅ Fim do Hyper Turbo! {found_count} achados.")
     else:
         await update.message.reply_text(f"✅ Fim do Hyper Turbo! Total: {total} | Achados: 0")
 
