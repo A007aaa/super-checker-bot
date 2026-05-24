@@ -18,7 +18,8 @@ async def check_sol(session, addr):
                 if res.status == 200:
                     data = await res.json()
                     bal = data.get('result', {}).get('value', 0) / 10**9
-                    if bal > 0: return ("SOL", addr, bal)
+                    if bal > 0:
+                        return ("SOL", addr, bal)
         except Exception as e:
             logger.debug(f"Erro SOL ({addr}): {e}")
     return None
@@ -32,8 +33,9 @@ async def check_eth_usdt(session, addr):
                 if res.status == 200:
                     data = await res.json()
                     bal = int(data.get('result', '0x0'), 16) / 10**18
-                    if bal > 0: return ("ETH", addr, bal)
-            
+                    if bal > 0:
+                        return ("ETH", addr, bal)
+
             # USDT (ERC20)
             usdt_contract = "0xdac17f958d2ee523a2206206994597c13d831ec7"
             data_call = "0x70a08231" + addr[2:].lower().zfill(64)
@@ -42,7 +44,8 @@ async def check_eth_usdt(session, addr):
                 if res.status == 200:
                     data = await res.json()
                     u_bal = int(data.get('result', '0x0'), 16) / 10**6
-                    if u_bal > 0: return ("USDT_ETH", addr, u_bal)
+                    if u_bal > 0:
+                        return ("USDT_ETH", addr, u_bal)
         except Exception as e:
             logger.debug(f"Erro ETH/USDT ({addr}): {e}")
     return None
@@ -53,7 +56,8 @@ async def check_btc(session, addr):
             async with session.get(f"https://blockchain.info/q/addressbalance/{addr}", timeout=8) as res:
                 if res.status == 200:
                     bal = int(await res.text()) / 10**8
-                    if bal > 0: return ("BTC", addr, bal)
+                    if bal > 0:
+                        return ("BTC", addr, bal)
         except Exception as e:
             logger.debug(f"Erro BTC ({addr}): {e}")
     return None
@@ -67,74 +71,62 @@ async def check_tron_usdt(session, addr):
                     if data.get('data'):
                         acc = data['data'][0]
                         trx_bal = acc.get('balance', 0) / 10**6
-                        if trx_bal > 0: return ("TRX", addr, trx_bal)
-                        for token in acc.get('trc20', []):
+                        if trx_bal > 0:
+                            return ("TRX", addr, trx_bal)
+                        
+                        trc20_list = acc.get('trc20', [])
+                        for token in trc20_list:
                             if 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' in token:
                                 u_bal = float(token['TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t']) / 10**6
-                                if u_bal > 0: return ("USDT_TRX", addr, u_bal)
+                                if u_bal > 0:
+                                    return ("USDT_TRX", addr, u_bal)
         except Exception as e:
             logger.debug(f"Erro TRON ({addr}): {e}")
     return None
 
 async def check_balance_master(type, value):
     async with aiohttp.ClientSession() as session:
-        tasks = []
+        addresses = []
         if type == "SEED":
             try:
                 seed_bytes = Bip39SeedGenerator(value).Generate()
+                # Derivações comuns
+                # BTC Segwit (BIP84)
+                bip84_mst = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN)
+                addresses.append(bip84_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress())
                 
-                # 1. SOLANA
-                for path in range(5):
-                    sol_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA).Purpose().Coin().Account(path).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
-                    tasks.append(check_sol(session, sol_addr))
+                # ETH (BIP44)
+                bip44_mst = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM)
+                addresses.append(bip44_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress())
                 
-                # 2. ETHEREUM
-                for acc in range(5):
-                    eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(acc).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
-                    tasks.append(check_eth_usdt(session, eth_addr))
-                
-                # 3. BITCOIN
-                # Native SegWit
-                for acc in range(3):
-                    addr = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(acc).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
-                    tasks.append(check_btc(session, addr))
-                # SegWit Híbrido
-                for acc in range(3):
-                    addr = Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(acc).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
-                    tasks.append(check_btc(session, addr))
-                # Legacy
-                for acc in range(3):
-                    addr = Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(acc).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
-                    tasks.append(check_btc(session, addr))
-                
-                # 4. TRON
-                trx_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
-                tasks.append(check_tron_usdt(session, trx_addr))
+                # SOL
+                # Para simplificar, usamos a derivação padrão que a maioria das carteiras usa
+                # Note: SOL usa Ed25519, bip_utils lida com isso.
+                from bip_utils import Bip44Coins
+                sol_mst = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA)
+                addresses.append(sol_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress())
                 
             except Exception as e:
-                logger.error(f"Erro ao derivar endereços da SEED: {e}")
-        
-        elif type == "SOL_KEY":
-            try:
-                # Se for chave privada de 64 bytes (formato comum da Solana), extrair o endereço
-                # No bip-utils, o SolAddr.Encode requer a chave pública.
-                # Para simplificar e garantir funcionamento, vamos focar em seeds por enquanto ou usar base58 direto se for endereço.
-                pass
-            except Exception as e:
-                logger.error(f"Erro ao processar SOL_KEY: {e}")
-            
-        elif type == "ETH_KEY":
-            try:
-                from eth_keys import keys
-                priv_key = keys.PrivateKey(bytes.fromhex(value.replace('0x', '')))
-                addr = priv_key.public_key.to_checksum_address()
-                tasks.append(check_eth_usdt(session, addr))
-            except Exception as e:
-                logger.error(f"Erro ao processar ETH_KEY: {e}")
+                logger.error(f"Erro ao derivar seed: {e}")
+                return None
+        else:
+            # Se for chave privada direta (assumindo formato comum)
+            addresses.append(value)
 
-        if not tasks:
-            return None
+        tasks = []
+        for addr in addresses:
+            if addr.startswith('1') or addr.startswith('3') or addr.startswith('bc1'):
+                tasks.append(check_btc(session, addr))
+            elif addr.startswith('0x'):
+                tasks.append(check_eth_usdt(session, addr))
+            elif addr.startswith('T'):
+                tasks.append(check_tron_usdt(session, addr))
+            else:
+                # Tenta SOL se não encaixar nos outros (endereços Base58 longos)
+                tasks.append(check_sol(session, addr))
 
         results = await asyncio.gather(*tasks)
         found = [r for r in results if r]
-        return (value, found) if found else None
+        if found:
+            return (value, found)
+    return None
