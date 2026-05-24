@@ -36,10 +36,12 @@ async def check_sol(session, addr):
     async with semaphore:
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [addr]}
         data = await fetch_post(session, SOL_RPC_URLS, payload)
-        if data and 'result' in data:
-            bal = data['result'].get('value', 0) / 10**9
-            if bal > 0:
-                return ("SOL", addr, bal)
+        if data and 'result' in data and data['result'] is not None:
+            val = data['result'].get('value', 0)
+            if val is not None:
+                bal = val / 10**9
+                if bal > 0:
+                    return ("SOL", addr, bal)
     return None
 
 async def check_eth_usdt(session, addr):
@@ -122,10 +124,13 @@ async def check_balance_master(type, value):
                     addr_eth = bip44_eth.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
                     tasks.append(check_eth_usdt(session, addr_eth))
                     
-                    # SOL (BIP44) - Derivação Padrão
+                    # SOL (BIP44) - Derivação Padrão e Phantom
                     bip44_sol = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA)
                     addr_sol = bip44_sol.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
                     tasks.append(check_sol(session, addr_sol))
+                    
+                    # Phantom/Solflare costumam usar m/44'/501'/0'/0' (que é o que o bip-utils faz acima)
+                    # Mas algumas carteiras usam m/44'/501'/0' direto.
 
                     # TRON (BIP44)
                     bip44_trx = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON)

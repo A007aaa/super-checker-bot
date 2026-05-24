@@ -81,10 +81,11 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     found_count = 0
 
     # Processamento em lotes para não travar o bot
-    for i, item_val in enumerate(items_list):
-        temp_items = extractor.extract_all(item_val)
-        if not temp_items: continue
-        item_type, val = temp_items[0]
+    for i, val in enumerate(items_list):
+        # Determina o tipo com base no formato (heurística simples já que o pool só guarda o valor)
+        item_type = "SEED" if len(val.split()) >= 12 else "KEY_SOL"
+        if len(val) == 64 and " " not in val:
+            item_type = "KEY_HEX"
 
         try:
             res = await check_balance_master(item_type, val)

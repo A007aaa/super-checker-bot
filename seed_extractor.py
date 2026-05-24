@@ -57,9 +57,9 @@ class SeedExtractor:
             else:
                 # Tenta encontrar a palavra mais próxima na wordlist BIP39
                 # Usando um threshold para evitar falsos positivos com palavras muito diferentes
-                # Aumentar o score_cutoff para reduzir falsos positivos
-                match = process.extractOne(word, self.wordlist, scorer=fuzz.ratio, score_cutoff=90)
-                if match: # match é uma tupla (palavra_correspondente, score, indice)
+                # Aumentar o score_cutoff para reduzir falsos positivos (95 é mais seguro)
+                match = process.extractOne(word, self.wordlist, scorer=fuzz.ratio, score_cutoff=95)
+                if match:
                     bip39_potential_words.append(match[0])
                 
         if len(bip39_potential_words) >= 12:
