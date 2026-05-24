@@ -39,7 +39,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🔥 **MODO MASTER ATIVADO!** 🔥\n"
         "Detectando Seeds, Chaves Privadas Solana e ETH.\n"
         "Foco: BTC, ETH, SOL, ADA, USDT, TRON.\n\n"
-        "Envie o texto e use /check para processar a memória ou envie e o bot processará automaticamente."
+        "Envie texto ou arquivos .txt. Use /check para processar a memória."
     )
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -103,12 +103,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     user_pools[user_id].append(text)
     
-    # Opcional: Auto-check se encontrar algo importante imediatamente
     items = extractor.extract_all(text)
     if items:
-        await update.message.reply_text(f"📥 {len(items)} itens detectados (Seeds/Keys). Use /check para iniciar a varredura.")
+        await update.message.reply_text(f"📥 {len(items)} itens detectados. Use /check para iniciar a varredura.")
     else:
-        await update.message.reply_text("📝 Texto recebido. Nenhuma Seed óbvia detectada, mas o texto foi salvo na memória. Continue enviando ou use /check.")
+        await update.message.reply_text("📝 Texto recebido e salvo na memória. Use /check.")
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Novo handler para processar arquivos .txt"""
+    if not await is_authorized(update):
+        return
+    
+    user_id = update.effective_user.id
+    document = update.message.document
+    
+    # Verifica se é um arquivo .txt
+    if not document.file_name.lower().endswith('.txt'):
+        await update.message.reply_text("❌ Por favor, envie apenas arquivos .txt.")
+        return
+
+    status_msg = await update.message.reply_text(f"📥 Processando arquivo `{document.file_name}`...")
+    
+    try:
+        # Baixa o arquivo para a memória
+        file = await context.bot.get_file(document.file_id)
+        file_bytearray = await file.download_as_bytearray()
+        
+        # Tenta decodificar o conteúdo (UTF-8 é o padrão)
+        try:
+            text = file_bytearray.decode('utf-8')
+        except UnicodeDecodeError:
+            # Caso falhe, tenta latin-1 (comum em arquivos Windows)
+            text = file_bytearray.decode('latin-1')
+        
+        if user_id not in user_pools:
+            user_pools[user_id] = []
+        
+        user_pools[user_id].append(text)
+        
+        items = extractor.extract_all(text)
+        if items:
+            await status_msg.edit_text(f"✅ Arquivo `{document.file_name}` processado!\n{len(items)} itens detectados. Use /check para iniciar.")
+        else:
+            await status_msg.edit_text(f"✅ Arquivo `{document.file_name}` salvo na memória. Nenhuma Seed detectada. Use /check.")
+            
+    except Exception as e:
+        logger.error(f"Erro ao processar arquivo: {e}")
+        await status_msg.edit_text(f"❌ Erro ao processar o arquivo: {str(e)}")
 
 async def main():
     if not TELEGRAM_BOT_TOKEN:
@@ -121,9 +162,14 @@ async def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("clear", clear_pool))
     application.add_handler(CommandHandler("check", check_pool))
+    
+    # Handler para mensagens de texto
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # NOVO: Handler para arquivos/documentos
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    logger.info("Bot iniciado...")
+    logger.info("Bot iniciado com suporte a arquivos .txt...")
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
