@@ -11,21 +11,25 @@ from bip_utils import (
     Bip32Utils, SolAddr
 )
 
-# ── Hyper Turbo Tunables ────────────────────────────────────────────────────
-REQUEST_TIMEOUT   = 15          
-SEED_TIMEOUT      = 180         
-MAX_CONCURRENT_REQUESTS = 20    
-GAP_LIMIT = 5                  
-MAX_ACCOUNTS = 2                
-HEADERS = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+# ── Configurações de Varredura ──────────────────────────────────────────────
+REQUEST_TIMEOUT   = 10          
+SEED_TIMEOUT      = 120         
+MAX_CONCURRENT_REQUESTS = 30    
+GAP_LIMIT = 5                   # Quantidade de endereços por conta
+MAX_ACCOUNTS = 2                # Quantidade de contas por seed
+# ────────────────────────────────────────────────────────────────────────────
+
+semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 RPC_URLS = {
-    "BSC": ["https://bsc-dataseed.binance.org/"],
-    "POLYGON": ["https://polygon-rpc.com/"],
-    "ETH": ["https://cloudflare-eth.com/"],
+    "BSC": ["https://bsc-dataseed.binance.org/", "https://bsc-dataseed1.defibit.io/"],
+    "POLYGON": ["https://polygon-rpc.com/", "https://rpc-mainnet.maticvigil.com/"],
+    "ETH": ["https://cloudflare-eth.com/", "https://eth-mainnet.public.blastapi.io"],
     "ARBITRUM": ["https://arb1.arbitrum.io/rpc"],
     "OPTIMISM": ["https://mainnet.optimism.io"],
-    "BASE": ["https://mainnet.base.org"]
+    "BASE": ["https://mainnet.base.org"],
+    "AVALANCHE": ["https://api.avax.network/ext/bc/C/rpc"],
+    "FANTOM": ["https://rpc.ftm.tools/"]
 }
 
 USDT_CONTRACTS = {
@@ -33,9 +37,6 @@ USDT_CONTRACTS = {
     "BSC": "0x55d398326f99059ff775485246999027b3197955",
     "POLYGON": "0xc2132d05d31c914a87c6611c10748aeb04b58e8f"
 }
-# ────────────────────────────────────────────────────────────────────────────
-
-semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 async def _rpc_call(session, urls, method, params):
     async with semaphore:
@@ -58,7 +59,7 @@ async def get_universal_addresses(seed_phrase):
     addr_map = []
     for account_idx in range(MAX_ACCOUNTS):
         for address_idx in range(GAP_LIMIT):
-            # BTC (Native SegWit, SegWit, Legacy)
+            # BTC
             try:
                 addr_map.append(("BTC", "Native", Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
                 addr_map.append(("BTC", "P2SH", Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
@@ -71,7 +72,7 @@ async def get_universal_addresses(seed_phrase):
                 addr_map.append(("DOGE", "Legacy", Bip44.FromSeed(seed_bytes, Bip44Coins.DOGECOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
             except Exception: pass
 
-            # EVM (ETH, BSC, Polygon, etc.)
+            # EVM
             try:
                 eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
                 addr_map.append(("EVM", "ADDR", eth_addr))
@@ -86,8 +87,8 @@ async def get_universal_addresses(seed_phrase):
 
             # Tron
             try:
-                trx_addr_std = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
-                addr_map.append(("TRX", "STD", trx_addr_std))
+                trx_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
+                addr_map.append(("TRX", "STD", trx_addr))
             except Exception: pass
 
     return addr_map
@@ -98,9 +99,8 @@ async def check_generic_insight(session, coin, addr, api_url):
             async with session.get(api_url.format(addr=addr), timeout=REQUEST_TIMEOUT) as res:
                 if res.status == 200:
                     data = await res.json()
-                    # Diferentes APIs têm diferentes formatos de resposta
-                    if "final_balance" in data: bal = data["final_balance"] / 10**8 # BTC blockchain.info
-                    elif "balance" in data: bal = float(data["balance"]) / 10**8 # Blockcypher style
+                    if "final_balance" in data: bal = data["final_balance"] / 10**8
+                    elif "balance" in data: bal = float(data["balance"]) / 10**8
                     else: return None
                     if bal > 0: return (coin, addr, bal)
         except Exception: pass

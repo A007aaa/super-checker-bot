@@ -20,24 +20,25 @@ class SeedExtractor:
     def extract_all_seeds(self, text):
         """
         Extrai todas as combinações possíveis de seeds BIP39 de um texto (sopa de letras).
-        A estratégia é filtrar apenas palavras válidas do BIP39 e testar janelas deslizantes.
+        Filtra palavras válidas e testa janelas deslizantes de forma exaustiva.
         """
         if not text: return []
         
-        # 1. Limpeza agressiva: extrair apenas palavras que pertencem à wordlist BIP39
-        # Isso transforma a "sopa de letras" em uma sequência pura de palavras candidatas.
+        # 1. Limpeza: extrair apenas palavras (a-z) e converter para minúsculo
         clean_text = re.sub(r'[^a-z\s]', ' ', text.lower())
         all_words = clean_text.split()
+        
+        # 2. Filtrar apenas palavras que pertencem à wordlist BIP39
         bip39_words = [word for word in all_words if word in self.wordlist]
         
         if not bip39_words:
             return []
 
         found_seeds = []
-        
-        # 2. Busca por Janela Deslizante (Sliding Window)
-        # Testamos todas as sequências possíveis de 12, 15, 18, 21 e 24 palavras.
         total_words = len(bip39_words)
+        
+        # 3. Busca por Janela Deslizante (Sliding Window)
+        # Testamos todas as sequências possíveis de todos os tamanhos suportados
         for length in self.lengths:
             if total_words < length:
                 continue
@@ -47,11 +48,6 @@ class SeedExtractor:
                 if self.is_valid_bip39(seed_phrase):
                     found_seeds.append(seed_phrase)
         
-        # 3. Busca por Combinações Espalhadas (Opcional/Avançado)
-        # Se as palavras da seed estiverem intercaladas com OUTRAS palavras BIP39 que não fazem parte dela,
-        # a janela deslizante ainda funcionará se a distância for pequena.
-        # Para casos extremos de "sopa", a janela deslizante sobre a lista filtrada é a melhor abordagem custo-benefício.
-
-        # Remover duplicatas mantendo a ordem de descoberta
+        # 4. Remover duplicatas mantendo a ordem de descoberta
         seen = set()
         return [x for x in found_seeds if not (x in seen or seen.add(x))]
