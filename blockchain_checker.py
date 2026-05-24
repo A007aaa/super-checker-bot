@@ -123,22 +123,35 @@ async def check_evm_full(session, addr):
 
 async def check_trx(session, addr):
     async with semaphore:
+        results = []
         try:
+            # TronGrid V1 API é excelente para ver saldo de TRX e TRC20 em uma única chamada
             async with session.get(f"https://api.trongrid.io/v1/accounts/{addr}", timeout=REQUEST_TIMEOUT) as res:
                 if res.status == 200:
                     data = await res.json()
-                    if data.get('data'):
+                    if data.get('data') and len(data['data']) > 0:
                         acc = data['data'][0]
-                        bal = acc.get('balance', 0) / 10**6
-                        if bal > 0: return [("TRX", addr, bal)]
-                        for t in acc.get('trc20', []):
-                            for contract, val in t.items():
-                                if float(val) > 0:
-                                    symbol = "USDT" if contract == 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' else "TRC20"
-                                    return [(symbol, addr, float(val)/10**6)]
+                        
+                        # 1. Verificar saldo de TRX
+                        bal_trx = acc.get('balance', 0) / 10**6
+                        if bal_trx > 0.1: # Filtro mínimo de TRX
+                            results.append(("TRX", addr, bal_trx))
+                        
+                        # 2. Verificar tokens TRC20 (incluindo USDT)
+                        trc20_list = acc.get('trc20', [])
+                        for token_data in trc20_list:
+                            for contract, val in token_data.items():
+                                try:
+                                    token_bal = float(val) / 10**6 # A maioria dos TRC20 usa 6 decimais como o USDT
+                                    if token_bal > 0.01:
+                                        symbol = "USDT" if contract == 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' else "TRC20"
+                                        results.append((symbol, addr, token_bal))
+                                except: continue
+                else:
+                    logger.warning(f"TronGrid retornou status {res.status} para {addr}")
         except Exception as e:
-            logger.warning(f"Erro ao verificar TRX para {addr}: {e}")
-        return []
+            logger.warning(f"Erro ao verificar TRX/TRC20 para {addr}: {e}")
+        return results
 
 async def check_balance_all(seed):
     seed = seed.strip()
