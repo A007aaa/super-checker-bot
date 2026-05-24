@@ -11,12 +11,12 @@ from bip_utils import (
     Bip32Utils, SolAddr
 )
 
-# ── Otimização de Performance ──────────────────────────────────────────────
-REQUEST_TIMEOUT   = 5           # Reduzido para não travar em RPCs lentos
-SEED_TIMEOUT      = 60          # Reduzido para acelerar o ciclo total
-MAX_CONCURRENT_REQUESTS = 100   # Aumentado drasticamente para alta performance
-GAP_LIMIT = 1                   # Focar apenas no endereço principal para velocidade máxima
-MAX_ACCOUNTS = 1                # Focar apenas na conta principal
+# ── Otimização de Performance Equilibrada ──────────────────────────────────
+REQUEST_TIMEOUT   = 8           
+SEED_TIMEOUT      = 120         
+MAX_CONCURRENT_REQUESTS = 50    
+GAP_LIMIT = 5                   # Voltou para 5 para achar mais endereços
+MAX_ACCOUNTS = 2                # Voltou para 2 contas
 # ────────────────────────────────────────────────────────────────────────────
 
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -30,12 +30,6 @@ RPC_URLS = {
     "BASE": ["https://mainnet.base.org"],
     "AVALANCHE": ["https://api.avax.network/ext/bc/C/rpc"],
     "FANTOM": ["https://rpc.ftm.tools/"]
-}
-
-USDT_CONTRACTS = {
-    "ETH": "0xdac17f958d2ee523a2206206994597c13d831ec7",
-    "BSC": "0x55d398326f99059ff775485246999027b3197955",
-    "POLYGON": "0xc2132d05d31c914a87c6611c10748aeb04b58e8f"
 }
 
 async def _rpc_call(session, urls, method, params):
@@ -52,34 +46,36 @@ async def _rpc_call(session, urls, method, params):
 
 async def get_universal_addresses(seed_phrase):
     try:
-        # Gerar seed bytes uma única vez para todas as moedas
         seed_bytes = Bip39SeedGenerator(seed_phrase).Generate()
     except Exception: return []
     
     addr_map = []
-    # BTC Native SegWit (mais comum hoje)
-    try:
-        addr_map.append(("BTC", "Native", Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()))
-    except Exception: pass
+    for acc in range(MAX_ACCOUNTS):
+        for idx in range(GAP_LIMIT):
+            # BTC
+            try:
+                addr_map.append(("BTC", "Native", Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(acc).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx).PublicKey().ToAddress()))
+                addr_map.append(("BTC", "P2SH", Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(acc).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx).PublicKey().ToAddress()))
+            except Exception: pass
 
-    # EVM (Cobre todas as redes compatíveis com Ethereum)
-    try:
-        eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
-        addr_map.append(("EVM", "ADDR", eth_addr))
-    except Exception: pass
+            # EVM
+            try:
+                eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(acc).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx).PublicKey().ToAddress()
+                addr_map.append(("EVM", "ADDR", eth_addr))
+            except Exception: pass
 
-    # Solana
-    try:
-        sol_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
-        sol_addr = SolAddr.Encode(sol_ctx.PublicKey().Raw().ToBytes())
-        addr_map.append(("SOL", "ADDR", sol_addr))
-    except Exception: pass
+            # Solana
+            try:
+                sol_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA).Purpose().Coin().Account(acc).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx)
+                sol_addr = SolAddr.Encode(sol_ctx.PublicKey().Raw().ToBytes())
+                addr_map.append(("SOL", "ADDR", sol_addr))
+            except Exception: pass
 
-    # Tron
-    try:
-        trx_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
-        addr_map.append(("TRX", "STD", trx_addr))
-    except Exception: pass
+            # Tron
+            try:
+                trx_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(acc).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx).PublicKey().ToAddress()
+                addr_map.append(("TRX", "STD", trx_addr))
+            except Exception: pass
 
     return addr_map
 
@@ -107,7 +103,6 @@ async def check_solana(session, addr):
 
 async def check_evm_quick(session, addr):
     results = []
-    # Verificar apenas as 3 redes principais para velocidade, ou todas em paralelo
     tasks = []
     for net, urls in RPC_URLS.items():
         tasks.append(_rpc_call(session, urls, "eth_getBalance", [addr, "latest"]))
@@ -115,8 +110,10 @@ async def check_evm_quick(session, addr):
     rpc_results = await asyncio.gather(*tasks)
     for i, res in enumerate(rpc_results):
         if res and res != '0x0':
-            bal = int(res, 16) / 10**18
-            if bal > 0: results.append((list(RPC_URLS.keys())[i], addr, bal))
+            try:
+                bal = int(res, 16) / 10**18
+                if bal > 0: results.append((list(RPC_URLS.keys())[i], addr, bal))
+            except: pass
     return results
 
 async def check_trx_quick(session, addr):
@@ -128,9 +125,9 @@ async def check_trx_quick(session, addr):
                     if data.get('data'):
                         acc = data['data'][0]
                         bal = acc.get('balance', 0) / 10**6
-                        if bal > 0: return [("TRX", addr, bal)]
+                        if bal > 0: return ("TRX", addr, bal)
         except Exception: pass
-        return []
+        return None
 
 async def check_balance_all(seed):
     seed = seed.strip()
