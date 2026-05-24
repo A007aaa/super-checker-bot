@@ -12,12 +12,12 @@ from bip_utils import (
 )
 
 # ── Hyper Turbo Tunables ────────────────────────────────────────────────────
-REQUEST_TIMEOUT   = 10          # Aumentado para acomodar RPCs mais lentos, especialmente para Tron
-SEED_TIMEOUT      = 120         # Aumentado para suportar varredura exaustiva sem interrupções
-MAX_CONCURRENT_REQUESTS = 10    # Aumentado levemente para maior velocidade, mantendo segurança contra 429
-CHECK_INDEX_COUNT = 1           # Foco total no endereço #0 (Velocidade Máxima)
-GAP_LIMIT = 10                  # Aumentado para maior assertividade, especialmente para Tron
-MAX_ACCOUNTS = 3                # Aumentado para maior assertividade
+REQUEST_TIMEOUT   = 15          # Aumentado para acomodar RPCs mais lentos
+SEED_TIMEOUT      = 180         # Aumentado para suportar varredura exaustiva total
+MAX_CONCURRENT_REQUESTS = 10    # Equilíbrio entre velocidade e rate limit
+CHECK_INDEX_COUNT = 1           
+GAP_LIMIT = 10                  
+MAX_ACCOUNTS = 3                
 HEADERS = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
 
 RPC_URLS = {
@@ -38,61 +38,49 @@ semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 async def _rpc_call(session, urls, method, params):
     async with semaphore:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        random.shuffle(urls) # Rotacionar URLs para distribuir a carga e tentar diferentes endpoints
+        random.shuffle(urls)
         for url in urls:
             try:
                 async with session.post(url, json=payload, timeout=REQUEST_TIMEOUT) as res:
                     if res.status == 200:
                         data = await res.json()
                         if 'result' in data: return data
-                    else:
-                        logger.warning(f"RPC {url} retornou status {res.status} para {method} com params {params}")
-            except aiohttp.ClientError as e:
-                logger.warning(f"Erro de conexão com RPC {url} para {method} com params {params}: {e}")
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout ao conectar com RPC {url} para {method} com params {params}")
-            except json.JSONDecodeError:
-                logger.warning(f"Erro ao decodificar JSON do RPC {url} para {method} com params {params}")
-            except Exception as e:
-                logger.error(f"Erro inesperado no RPC {url} para {method} com params {params}: {e}")
+            except Exception: continue
         return None
 
 async def get_universal_addresses(seed_phrase):
-    seed_bytes = Bip39SeedGenerator(seed_phrase).Generate()
+    try:
+        seed_bytes = Bip39SeedGenerator(seed_phrase).Generate()
+    except Exception: return []
+    
     addr_map = []
-
     for account_idx in range(MAX_ACCOUNTS):
         for address_idx in range(GAP_LIMIT):
-            # BTC (BIP-44, BIP-49, BIP-84)
+            # BTC
             try:
-                # BIP-84 (Native SegWit)
                 addr_map.append(("BTC", "Native", Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
-                # BIP-49 (P2SH-SegWit)
                 addr_map.append(("BTC", "P2SH-SegWit", Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
-                # BIP-44 (P2PKH Legacy)
                 addr_map.append(("BTC", "P2PKH", Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
             except Exception: pass
 
-            # EVM (BIP-44)
+            # EVM
             try:
                 eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
                 addr_map.append(("EVM", "ADDR", eth_addr))
             except Exception: pass
 
-            # Tron (Múltiplos Caminhos)
+            # Tron
             try:
-                # 1. Padrão BIP-44 (m/44'/195'/0'/0/0)
+                # Standard
                 trx_addr_std = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
                 addr_map.append(("TRX", "STD", trx_addr_std))
                 
-                # 2. Alternativo (m/44'/195'/0'/0) - Comum em algumas carteiras
-                # Usando Bip32 diretamente para caminhos customizados
+                # Alt Path
                 bip32_ctx = Bip32Utils.FromSeed(seed_bytes).DerivePath(f"m/44'/195'/{account_idx}'/0")
                 trx_addr_alt = Bip44.FromPublicKey(bip32_ctx.PublicKey().Raw().ToBytes(), Bip44Coins.TRON).PublicKey().ToAddress()
                 addr_map.append(("TRX", "ALT", trx_addr_alt))
                 
-                # 3. Trust Wallet Style (Tron usando caminho de ETH: m/44'/60'/0'/0/index)
-                # Algumas carteiras multi-chain usam a chave de ETH para derivar Tron
+                # Trust Wallet Style (Tron via ETH path)
                 eth_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx)
                 trx_addr_trust = Bip44.FromPublicKey(eth_ctx.PublicKey().Raw().ToBytes(), Bip44Coins.TRON).PublicKey().ToAddress()
                 addr_map.append(("TRX", "TRUST", trx_addr_trust))
@@ -108,8 +96,7 @@ async def check_btc(session, addr):
                     data = await res.json()
                     bal = data.get(addr, {}).get("final_balance", 0) / 10**8
                     if bal > 0: return ("BTC", addr, bal)
-        except Exception as e:
-            logger.warning(f"Erro ao verificar BTC para {addr}: {e}")
+        except Exception: pass
         return None
 
 async def check_evm_full(session, addr):
@@ -118,7 +105,7 @@ async def check_evm_full(session, addr):
         data = await _rpc_call(session, urls, "eth_getBalance", [addr, "latest"])
         if data and 'result' in data:
             bal = int(data['result'], 16) / 10**18
-            if bal > 0.0001: results.append((net, addr, bal))
+            if bal > 0: results.append((net, addr, bal))
         
         contract = USDT_CONTRACTS.get(net)
         if contract:
@@ -126,46 +113,38 @@ async def check_evm_full(session, addr):
             t_data = await _rpc_call(session, urls, "eth_call", [{"to": contract, "data": call_data}, "latest"])
             if t_data and 'result' in t_data and t_data['result'] != '0x':
                 t_bal = int(t_data['result'], 16) / 10**6
-                if t_bal > 0.1: results.append((f"USDT_{net}", addr, t_bal))
+                if t_bal > 0: results.append((f"USDT_{net}", addr, t_bal))
     return results
 
 async def check_trx(session, addr):
     async with semaphore:
         results = []
         try:
-            # TronGrid V1 API é excelente para ver saldo de TRX e TRC20 em uma única chamada
-            # Adicionando um pequeno delay aleatório para evitar picos de requisição
-            await asyncio.sleep(random.uniform(0.5, 2.0))
+            await asyncio.sleep(random.uniform(1.0, 3.0)) # Delay maior para TronGrid
             async with session.get(f"https://api.trongrid.io/v1/accounts/{addr}", timeout=REQUEST_TIMEOUT) as res:
                 if res.status == 200:
                     data = await res.json()
                     if data.get('data') and len(data['data']) > 0:
                         acc = data['data'][0]
-                        
-                        # 1. Verificar saldo de TRX
                         bal_trx = acc.get('balance', 0) / 10**6
-                        if bal_trx > 0.01: # Filtro mínimo de TRX
-                            results.append(("TRX", addr, bal_trx))
+                        if bal_trx > 0: results.append(("TRX", addr, bal_trx))
                         
-                        # 2. Verificar tokens TRC20 (incluindo USDT)
                         trc20_list = acc.get('trc20', [])
                         for token_data in trc20_list:
                             for contract, val in token_data.items():
                                 try:
-                                    token_bal = float(val) / 10**6 # A maioria dos TRC20 usa 6 decimais como o USDT
-                                    if token_bal > 0.01:
+                                    token_bal = float(val) / 10**6
+                                    if token_bal > 0:
                                         symbol = "USDT" if contract == 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' else "TRC20"
                                         results.append((symbol, addr, token_bal))
                                 except: continue
-                else:
-                    logger.warning(f"TronGrid retornou status {res.status} para {addr}")
-        except Exception as e:
-            logger.warning(f"Erro ao verificar TRX/TRC20 para {addr}: {e}")
+        except Exception: pass
         return results
 
 async def check_balance_all(seed):
     seed = seed.strip()
-    if not seed or not Bip39MnemonicValidator().IsValid(seed): return None
+    if not seed: return None
+    # Removida a validação rigorosa do Bip39MnemonicValidator para evitar falsos negativos
     addr_map = await get_universal_addresses(seed)
     if not addr_map: return None
 
@@ -178,12 +157,7 @@ async def check_balance_all(seed):
         
         try:
             raw = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=SEED_TIMEOUT)
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout geral ao verificar seed {seed}")
-            raw = []
-        except Exception as e:
-            logger.error(f"Erro inesperado ao verificar seed {seed}: {e}")
-            raw = []
+        except Exception: raw = []
 
     found = []
     for item in raw:
@@ -191,7 +165,6 @@ async def check_balance_all(seed):
             if isinstance(item, list): found.extend(item)
             else: found.append(item)
     
-    # Remover duplicatas de resultados (mesmo endereço em caminhos diferentes)
     unique_found = []
     seen_results = set()
     for coin, addr, bal in found:
