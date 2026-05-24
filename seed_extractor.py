@@ -2,13 +2,15 @@ import re
 import logging
 from mnemonic import Mnemonic
 import base58
+from rapidfuzz import process, fuzz
 
 logger = logging.getLogger(__name__)
 
 class SeedExtractor:
     def __init__(self):
         self.mnemo = Mnemonic("english")
-        self.wordlist = set(self.mnemo.wordlist)
+        self.wordlist = list(self.mnemo.wordlist) # Convert to list for rapidfuzz
+        self.wordlist_set = set(self.mnemo.wordlist) # Keep set for fast exact lookups
 
     def is_valid_bip39(self, seed):
         try:
@@ -47,18 +49,27 @@ class SeedExtractor:
         clean_text = re.sub(r'[^a-zA-Z\s]', ' ', text).lower()
         all_words = clean_text.split()
         
-        # Filtrar apenas palavras que pertencem à lista BIP39 oficial
-        bip39_words = [w for w in all_words if w in self.wordlist]
-        
-        if len(bip39_words) >= 12:
+        # Filtrar e corrigir palavras usando fuzzy matching
+        bip39_potential_words = []
+        for word in all_words:
+            if word in self.wordlist_set: # Prioriza correspondência exata
+                bip39_potential_words.append(word)
+            else:
+                # Tenta encontrar a palavra mais próxima na wordlist BIP39
+                # Usando um threshold para evitar falsos positivos com palavras muito diferentes
+                match = process.extractOne(word, self.wordlist, scorer=fuzz.ratio, score_cutoff=80)
+                if match: # match é uma tupla (palavra_correspondente, score, indice)
+                    bip39_potential_words.append(match[0])
+                
+        if len(bip39_potential_words) >= 12:
             # Testar janelas de 12, 15, 18, 21 e 24 palavras (padrões BIP39)
             # Como o texto pode ser muito longo, limitamos a busca para eficiência
-            max_words = min(len(bip39_words), 5000)
+            max_words = min(len(bip39_potential_words), 5000)
             valid_lengths = [12, 15, 18, 21, 24]
             
             for length in valid_lengths:
                 for i in range(max_words - length + 1):
-                    phrase = " ".join(bip39_words[i : i + length])
+                    phrase = " ".join(bip39_potential_words[i : i + length])
                     if self.is_valid_bip39(phrase):
                         results.append(("SEED", phrase))
 
