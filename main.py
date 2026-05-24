@@ -93,8 +93,9 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 found_count += 1
                 seed_val, balances = res
                 msg = f"🎯 **SALDO ENCONTRADO!** ({item_type})\n`{seed_val}`\n"
+                # Agrupar por moeda para encurtar a mensagem se houver muitos endereços
                 for coin, addr, bal in balances:
-                    msg += f"• {coin}: {bal} (Endereço: `{addr}`)\n"
+                    msg += f"• **{coin}**: `{bal}`\n  └ Endereço: `{addr}`\n"
                 await update.message.reply_text(msg)
         except Exception as e:
             logger.error(f"Erro ao verificar: {e}")
