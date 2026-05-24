@@ -19,7 +19,6 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "8422682029"))
 
 extractor = SeedExtractor()
 # Agora o pool guarda apenas os ITENS ÚNICOS extraídos (Seeds/Keys), não o texto bruto.
-# Isso economiza MUITA memória.
 user_pools = {}
 
 async def is_authorized(update: Update) -> bool:
@@ -154,7 +153,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.error(f"Erro no arquivo {document.file_name}: {e}")
 
-async def main():
+def main():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -166,15 +165,7 @@ async def main():
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     logger.info("Bot Master iniciado...")
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    
-    while True:
-        await asyncio.sleep(3600)
+    application.run_polling()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    main()
