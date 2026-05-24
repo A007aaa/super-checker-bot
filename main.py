@@ -14,7 +14,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configurações do Bot
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8785377732:AAGgt1tT7eFDzJnaQKISrgKHP7k3C5M4nBs")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") # Removido o token fixo por segurança
+if not TELEGRAM_BOT_TOKEN:
+    logger.critical("TELEGRAM_BOT_TOKEN não configurado. O bot não pode iniciar.")
+    exit(1)
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "8422682029"))
 
 extractor = SeedExtractor()
@@ -164,8 +167,11 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    logger.info("Bot Master iniciado...")
-    application.run_polling()
+    try:
+        logger.info("Bot Master iniciado...")
+        application.run_polling()
+    except Exception as e:
+        logger.critical(f"ERRO FATAL NA INICIALIZAÇÃO: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()
