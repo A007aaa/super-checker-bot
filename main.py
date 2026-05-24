@@ -105,7 +105,10 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         percent = int(((i + 1) / total) * 100)
         try:
             await status_msg.edit_text(f"🔍 Progresso: {percent}% ({i+1}/{total})\n🎯 Encontrados: {found_count}\n⏳ Processando: `{val[:20]}...`")
-        except: pass # Evita erro se a mensagem de status for igual à anterior
+        except: pass 
+
+        # Pausa obrigatória entre seeds para evitar Rate Limit das APIs
+        await asyncio.sleep(2)
 
     await update.message.reply_text(f"✅ Varredura concluída!\nItens processados: {total}\nSaldos positivos: {found_count}")
     user_pools[user_id] = set()
