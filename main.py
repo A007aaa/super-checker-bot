@@ -41,7 +41,7 @@ async def process_seed_silent(user_id, seed, update):
             await save_result(user_id, seed, found)
             msg = f"🎯 **SALDO ENCONTRADO!**\nSeed: `{seed}`\n"
             for c, a, b in found: msg += f"• {c}: {b}\n"
-            await update.message.reply_text(msg, parse_mode='Markdown')
+            await update.message.reply_text(msg)
             return True
     except Exception as e:
         logger.error(f"Erro ao processar seed {seed}: {e}")
