@@ -91,8 +91,11 @@ async def get_universal_addresses(seed_phrase):
                 trx_addr_alt = Bip44.FromPublicKey(bip32_ctx.PublicKey().Raw().ToBytes(), Bip44Coins.TRON).PublicKey().ToAddress()
                 addr_map.append(("TRX", "ALT", trx_addr_alt))
                 
-                # 3. Trust Wallet / TronLink Deep (m/44'/195'/0'/0/index)
-                # O Bip44 já cobre isso no loop de address_idx, mas vamos reforçar o account_idx
+                # 3. Trust Wallet Style (Tron usando caminho de ETH: m/44'/60'/0'/0/index)
+                # Algumas carteiras multi-chain usam a chave de ETH para derivar Tron
+                eth_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx)
+                trx_addr_trust = Bip44.FromPublicKey(eth_ctx.PublicKey().Raw().ToBytes(), Bip44Coins.TRON).PublicKey().ToAddress()
+                addr_map.append(("TRX", "TRUST", trx_addr_trust))
             except Exception: pass
 
     return addr_map
