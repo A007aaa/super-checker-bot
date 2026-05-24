@@ -11,12 +11,13 @@ from seed_extractor import SeedExtractor
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGEOY6H0Bo_mgvbymAJ-vWdmH08GMIQGnM')
+TELEGRAM_BOT_TOKEN = os.getenv(\'TELEGRAM_BOT_TOKEN\')
 extractor = SeedExtractor()
 
 user_word_pools = {}
 MAX_PARALLEL_SEEDS = 100 # Modo Hyper Turbo: 100 seeds por vez
-RESULTS_FILE = "achados_com_saldo.txt"
+def get_results_file_path(user_id):
+    return f"achados_com_saldo_{user_id}.txt"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🚀 **MODO HYPER TURBO ATIVADO!** ⚡🔥\n\nProcessando 100 seeds simultaneamente. Velocidade máxima de varredura.")
@@ -26,23 +27,24 @@ async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user_word_pools[user_id] = []
     await update.message.reply_text("🗑️ Memória limpa.")
 
-async def save_result(seed, found_list):
-    with open(RESULTS_FILE, "a") as f:
+async def save_result(user_id, seed, found_list):
+    with open(get_results_file_path(user_id), "a") as f:
         f.write(f"SEED: {seed}\n")
         for c, a, b in found_list: f.write(f" - {c}: {b} (Addr: {a})\n")
         f.write("-" * 30 + "\n")
 
-async def process_seed_silent(seed, update):
+async def process_seed_silent(user_id, seed, update):
     try:
         res = await check_balance_all(seed)
         if res:
             seed, found = res
-            await save_result(seed, found)
+            await save_result(user_id, seed, found)
             msg = f"🎯 **SALDO ENCONTRADO!**\nSeed: `{seed}`\n"
             for c, a, b in found: msg += f"• {c}: {b}\n"
             await update.message.reply_text(msg, parse_mode='Markdown')
             return True
-    except: pass
+    except Exception as e:
+        logger.error(f"Erro ao processar seed {seed}: {e}")
     return False
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -61,7 +63,7 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     found_count = 0
     for i in range(0, total, MAX_PARALLEL_SEEDS):
         batch = seeds[i:i + MAX_PARALLEL_SEEDS]
-        tasks = [process_seed_silent(seed, update) for seed in batch]
+        tasks = [process_seed_silent(user_id, seed, update) for seed in batch]
         results = await asyncio.gather(*tasks)
         found_count += sum(1 for r in results if r)
         
@@ -69,11 +71,12 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             progress = min(i + MAX_PARALLEL_SEEDS, total)
             try:
                 await status_msg.edit_text(f"🚀 **Hyper:** {progress}/{total} | 🎯 **Achados:** {found_count}")
-            except: pass
+            except Exception as e:
+                logger.warning(f"Erro ao enviar mensagem de progresso: {e}")
             await asyncio.sleep(1)
 
-    if found_count > 0 and os.path.exists(RESULTS_FILE):
-        await update.message.reply_document(document=open(RESULTS_FILE, 'rb'), caption=f"✅ Fim do Hyper Turbo! {found_count} achados.")
+    if found_count > 0 and os.path.exists(get_results_file_path(user_id)):
+        await update.message.reply_document(document=open(get_results_file_path(user_id), \'rb\'), caption=f"✅ Fim do Hyper Turbo! {found_count} achados.")
     else:
         await update.message.reply_text(f"✅ Fim do Hyper Turbo! Total: {total} | Achados: 0")
 
@@ -96,7 +99,8 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_word_pools[user_id].extend(new_words)
     try:
         await update.message.reply_text(f"📥 +{len(new_words)} (Total: {len(user_word_pools[user_id])})")
-    except: pass
+    except Exception as e:
+        logger.warning(f"Erro ao enviar mensagem de confirmação de palavras: {e}")
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()

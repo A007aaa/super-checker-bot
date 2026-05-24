@@ -1,6 +1,10 @@
 import asyncio
 import aiohttp
 import json
+import logging
+import random
+
+logger = logging.getLogger(__name__)
 from bip_utils import (
     Bip39SeedGenerator, Bip44, Bip44Coins, Bip44Changes,
     Bip49, Bip49Coins, Bip84, Bip84Coins, Bip39MnemonicValidator
@@ -11,6 +15,8 @@ REQUEST_TIMEOUT   = 5           # Ultra rápido
 SEED_TIMEOUT      = 30          
 MAX_CONCURRENT_REQUESTS = 100   # Concorrência extrema
 CHECK_INDEX_COUNT = 1           # Foco total no endereço #0 (Velocidade Máxima)
+GAP_LIMIT = 20                  # Número de endereços a verificar sem transações
+MAX_ACCOUNTS = 5                # Número de contas a verificar por seed
 HEADERS = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
 
 RPC_URLS = {
@@ -31,36 +37,60 @@ semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 async def _rpc_call(session, urls, method, params):
     async with semaphore:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        random.shuffle(urls) # Rotacionar URLs para distribuir a carga e tentar diferentes endpoints
         for url in urls:
             try:
                 async with session.post(url, json=payload, timeout=REQUEST_TIMEOUT) as res:
                     if res.status == 200:
                         data = await res.json()
                         if 'result' in data: return data
-            except: continue
+                    else:
+                        logger.warning(f"RPC {url} retornou status {res.status} para {method} com params {params}")
+            except aiohttp.ClientError as e:
+                logger.warning(f"Erro de conexão com RPC {url} para {method} com params {params}: {e}")
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout ao conectar com RPC {url} para {method} com params {params}")
+            except json.JSONDecodeError:
+                logger.warning(f"Erro ao decodificar JSON do RPC {url} para {method} com params {params}")
+            except Exception as e:
+                logger.error(f"Erro inesperado no RPC {url} para {method} com params {params}: {e}")
         return None
 
 async def get_universal_addresses(seed_phrase):
-    try:
-        seed_bytes = Bip39SeedGenerator(seed_phrase).Generate()
-        addr_map = []
-        # Apenas Índice 0 para Velocidade Máxima
-        i = 0
-        # BTC (Native SegWit é o mais comum hoje)
-        try:
-            addr_map.append(("BTC", "Native", Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
-        except: pass
-        # EVM
-        try:
-            eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
-            addr_map.append(("EVM", "ADDR", eth_addr))
-        except: pass
-        # Tron
-        try:
-            addr_map.append(("TRX", "TRX", Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
-        except: pass
-        return addr_map
-    except: return []
+    seed_bytes = Bip39SeedGenerator(seed_phrase).Generate()
+    addr_map = []
+
+    for account_idx in range(MAX_ACCOUNTS):
+        for address_idx in range(GAP_LIMIT):
+            # BTC (BIP-44, BIP-49, BIP-84)
+            try:
+                # BIP-84 (Native SegWit)
+                addr_map.append(("BTC", "Native", Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
+                # BIP-49 (P2SH-SegWit)
+                addr_map.append(("BTC", "P2SH-SegWit", Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
+                # BIP-44 (P2PKH Legacy)
+                addr_map.append(("BTC", "P2PKH", Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
+            except Exception as e: 
+                # logger.warning(f"Erro ao derivar BTC para seed {seed_phrase} account {account_idx} index {address_idx}: {e}")
+                pass
+
+            # EVM (BIP-44)
+            try:
+                eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
+                addr_map.append(("EVM", "ADDR", eth_addr))
+            except Exception as e: 
+                # logger.warning(f"Erro ao derivar EVM para seed {seed_phrase} account {account_idx} index {address_idx}: {e}")
+                pass
+
+            # Tron (BIP-44)
+            try:
+                trx_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
+                addr_map.append(("TRX", "TRX", trx_addr))
+            except Exception as e: 
+                # logger.warning(f"Erro ao derivar TRX para seed {seed_phrase} account {account_idx} index {address_idx}: {e}")
+                pass
+
+    return addr_map
 
 async def check_btc(session, addr):
     async with semaphore:
@@ -70,7 +100,8 @@ async def check_btc(session, addr):
                     data = await res.json()
                     bal = data.get(addr, {}).get("final_balance", 0) / 10**8
                     if bal > 0: return ("BTC", addr, bal)
-        except: pass
+        except Exception as e:
+            logger.warning(f"Erro ao verificar BTC para {addr}: {e}")
         return None
 
 async def check_evm_full(session, addr):
@@ -105,7 +136,8 @@ async def check_trx(session, addr):
                                 if float(val) > 0:
                                     symbol = "USDT" if contract == 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' else "TRC20"
                                     return [(symbol, addr, float(val)/10**6)]
-        except: pass
+        except Exception as e:
+            logger.warning(f"Erro ao verificar TRX para {addr}: {e}")
         return []
 
 async def check_balance_all(seed):
@@ -123,7 +155,12 @@ async def check_balance_all(seed):
         
         try:
             raw = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=SEED_TIMEOUT)
-        except: raw = []
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout geral ao verificar seed {seed}")
+            raw = []
+        except Exception as e:
+            logger.error(f"Erro inesperado ao verificar seed {seed}: {e}")
+            raw = []
 
     found = []
     for item in raw:
