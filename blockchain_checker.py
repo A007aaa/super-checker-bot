@@ -136,7 +136,8 @@ async def check_balance_master(type, value):
         if type == "SEED":
             try:
                 seed_bytes = Bip39SeedGenerator(value).Generate()
-                for i in range(20):
+                # FORÇA BRUTA: 50 endereços por seed
+                for i in range(50):
                     # BTC (BIP84, BIP44)
                     for coin_type in [Bip84Coins.BITCOIN, Bip44Coins.BITCOIN]:
                         try:
