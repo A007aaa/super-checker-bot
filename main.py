@@ -80,16 +80,15 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     status_msg = await update.message.reply_text("⏳ Processando: 0%")
     found_count = 0
 
-    # Processamento em lotes para não travar o bot
-    for i, val in enumerate(items_list):
-        # Determina o tipo com base no formato
+    # MODO TURBO: Processamento paralelo de múltiplas seeds
+    async def check_and_report(i, val):
+        nonlocal found_count
         words_count = len(val.split())
         item_type = "SEED" if words_count in [12, 15, 18, 21, 24] else "KEY_SOL"
         if len(val) == 64 and " " not in val:
             item_type = "KEY_HEX"
-
+        
         try:
-            # Feedback visual imediato para cada item processado se a lista for pequena
             res = await check_balance_master(item_type, val)
             if res:
                 found_count += 1
@@ -100,15 +99,19 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 await update.message.reply_text(msg)
         except Exception as e:
             logger.error(f"Erro ao verificar item {i}: {e}")
-        
-        # Atualiza status com mais frequência para evitar que o usuário ache que o bot travou
-        percent = int(((i + 1) / total) * 100)
-        try:
-            await status_msg.edit_text(f"🔍 Progresso: {percent}% ({i+1}/{total})\n🎯 Encontrados: {found_count}\n⏳ Processando: `{val[:20]}...`")
-        except: pass 
 
-        # Pausa reduzida para quase zero (apenas para permitir que o bot processe mensagens do Telegram)
-        await asyncio.sleep(0.1)
+    # Criar tarefas para todas as seeds e processar em paralelo (lotes de 10 seeds simultâneas)
+    batch_size = 10
+    for i in range(0, total, batch_size):
+        batch = items_list[i:i+batch_size]
+        tasks = [check_and_report(i + j, val) for j, val in enumerate(batch)]
+        await asyncio.gather(*tasks)
+        
+        # Atualiza status após cada lote
+        percent = min(100, int(((i + batch_size) / total) * 100))
+        try:
+            await status_msg.edit_text(f"🚀 MODO TURBO: {percent}% ({min(i+batch_size, total)}/{total})\n🎯 Encontrados: {found_count}")
+        except: pass
 
     await update.message.reply_text(f"✅ Varredura concluída!\nItens processados: {total}\nSaldos positivos: {found_count}")
     user_pools[user_id] = set()
