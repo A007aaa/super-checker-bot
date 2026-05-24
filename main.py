@@ -19,21 +19,14 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8785377732:AAEq7f-65k_Obwy
 if not TELEGRAM_BOT_TOKEN:
     logger.critical("TELEGRAM_BOT_TOKEN não configurado. O bot não pode iniciar.")
     exit(1)
-ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "8422682029"))
+# O bot agora aceita qualquer usuário que interagir com ele (Removida trava de ID)
+ALLOWED_USER_ID = None 
 
 extractor = SeedExtractor()
-# Agora o pool guarda apenas os ITENS ÚNICOS extraídos (Seeds/Keys), não o texto bruto.
 user_pools = {}
 
 async def is_authorized(update: Update) -> bool:
-    if not update.effective_user:
-        return False
-    user_id = update.effective_user.id
-    if user_id != ALLOWED_USER_ID:
-        logger.warning(f"Acesso negado para o usuário: {user_id}")
-        if update.message:
-            await update.message.reply_text("⛔ **ACESSO NEGADO.** Este bot é privado.")
-        return False
+    # Removida restrição de ID para garantir que o dono consiga usar em qualquer conta
     return True
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
