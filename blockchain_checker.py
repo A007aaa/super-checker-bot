@@ -13,10 +13,10 @@ from bip_utils import (
 # ── Hyper Turbo Tunables ────────────────────────────────────────────────────
 REQUEST_TIMEOUT   = 5           # Ultra rápido
 SEED_TIMEOUT      = 30          
-MAX_CONCURRENT_REQUESTS = 100   # Concorrência extrema
+MAX_CONCURRENT_REQUESTS = 20    # Reduzido para não ser bloqueado pelos RPCs públicos
 CHECK_INDEX_COUNT = 1           # Foco total no endereço #0 (Velocidade Máxima)
-GAP_LIMIT = 20                  # Número de endereços a verificar sem transações
-MAX_ACCOUNTS = 5                # Número de contas a verificar por seed
+GAP_LIMIT = 5                   # Reduzido para evitar bloqueios, mas mantendo assertividade básica
+MAX_ACCOUNTS = 2                # Reduzido para foco nas contas principais
 HEADERS = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
 
 RPC_URLS = {

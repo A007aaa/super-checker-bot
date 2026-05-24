@@ -15,7 +15,7 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGEOY6H0Bo_mgv
 extractor = SeedExtractor()
 
 user_word_pools = {}
-MAX_PARALLEL_SEEDS = 100 # Modo Hyper Turbo: 100 seeds por vez
+MAX_PARALLEL_SEEDS = 5   # Reduzido para processar em lotes menores e evitar travamentos
 def get_results_file_path(user_id):
     return f"achados_com_saldo_{user_id}.txt"
 
