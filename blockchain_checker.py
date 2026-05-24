@@ -8,8 +8,7 @@ from bip_utils import (
 )
 
 logger = logging.getLogger(__name__)
-# Semáforo equilibrado para não ser banido instantaneamente
-semaphore = asyncio.Semaphore(30)
+semaphore = asyncio.Semaphore(20)
 
 ETH_RPC_URLS = [
     "https://cloudflare-eth.com/",
@@ -35,13 +34,13 @@ async def fetch_post(session, urls, payload, retries=5):
             async with session.post(url, json=payload, timeout=15) as res:
                 if res.status == 200:
                     data = await res.json()
-                    if data and 'result' in data:
+                    if data and ('result' in data or 'error' not in data):
                         return data
-                elif res.status == 429: # Rate Limit
-                    await asyncio.sleep(1 * (attempt + 1))
+                elif res.status == 429:
+                    await asyncio.sleep(2 * (attempt + 1))
                     continue
         except:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
             continue
     return None
 
@@ -104,21 +103,27 @@ async def check_eth_assets(session, addr):
 
 async def check_btc(session, addr):
     async with semaphore:
-        # Usando BlockCypher como primário por ser mais estável para BTC
-        url = f"https://api.blockcypher.com/v1/btc/main/addrs/{addr}/balance"
-        try:
-            async with session.get(url, timeout=15) as res:
-                if res.status == 200:
-                    data = await res.json()
-                    bal = data.get('balance', 0) / 10**8
-                    if bal > 0: return [("BTC", addr, bal)]
-        except:
+        # Tenta múltiplas APIs para BTC
+        apis = [
+            f"https://api.blockcypher.com/v1/btc/main/addrs/{addr}/balance",
+            f"https://blockchain.info/q/addressbalance/{addr}",
+            f"https://blockstream.info/api/address/{addr}"
+        ]
+        for url in apis:
             try:
-                async with session.get(f"https://blockchain.info/q/addressbalance/{addr}", timeout=10) as res:
+                async with session.get(url, timeout=10) as res:
                     if res.status == 200:
-                        bal = int(await res.text()) / 10**8
+                        if "blockcypher" in url:
+                            data = await res.json()
+                            bal = data.get('balance', 0) / 10**8
+                        elif "blockstream" in url:
+                            data = await res.json()
+                            bal = (data['chain_stats']['funded_txo_sum'] - data['chain_stats']['spent_txo_sum']) / 10**8
+                        else:
+                            bal = int(await res.text()) / 10**8
                         if bal > 0: return [("BTC", addr, bal)]
-            except: pass
+                        return []
+            except: continue
         return []
 
 async def check_tron_assets(session, addr):
@@ -150,26 +155,33 @@ async def check_balance_master(type, value):
         if type == "SEED":
             try:
                 seed_bytes = Bip39SeedGenerator(value).Generate()
-                # Reduzindo para 10 endereços por rede para garantir qualidade e evitar banimento
-                for i in range(10):
-                    # BTC
-                    bip84_btc = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN)
-                    addr_btc = bip84_btc.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
-                    tasks.append(check_btc(session, addr_btc))
+                # Verificando 20 endereços com cobertura total de padrões
+                for i in range(20):
+                    # BTC Native Segwit (bc1...)
+                    addr_84 = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
+                    tasks.append(check_btc(session, addr_84))
+                    
+                    # BTC Segwit (3...) - BIP49
+                    addr_49 = Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
+                    tasks.append(check_btc(session, addr_49))
+
+                    # BTC Legacy (1...) - BIP44
+                    addr_44 = Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
+                    tasks.append(check_btc(session, addr_44))
                     
                     # ETH
-                    bip44_eth = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM)
-                    addr_eth = bip44_eth.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
+                    addr_eth = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
                     tasks.append(check_eth_assets(session, addr_eth))
                     
-                    # SOL
+                    # SOL (Caminhos variados)
                     bip44_sol = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA)
-                    addr_sol = bip44_sol.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
-                    tasks.append(check_sol_assets(session, addr_sol))
+                    tasks.append(check_sol_assets(session, bip44_sol.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
+                    try:
+                        tasks.append(check_sol_assets(session, bip44_sol.Purpose().Coin().Account(i).PublicKey().ToAddress()))
+                    except: pass
 
                     # TRON
-                    bip44_trx = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON)
-                    addr_trx = bip44_trx.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
+                    addr_trx = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
                     tasks.append(check_tron_assets(session, addr_trx))
                 
             except Exception as e:
