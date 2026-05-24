@@ -26,20 +26,16 @@ extractor = SeedExtractor()
 user_pools = {}
 
 async def is_authorized(update: Update) -> bool:
-    # Removida restrição de ID para garantir que o dono consiga usar em qualquer conta
     return True
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await is_authorized(update):
-        return
     await update.message.reply_text(
         "🚀 **SUPER CHECKER OTIMIZADO** 🚀\n\n"
-        "Envie textos ou vários arquivos `.txt` ao mesmo tempo.\n"
-        "O bot extrairá as Seeds automaticamente e as guardará na fila.\n\n"
+        "Envie textos ou arquivos `.txt`.\n"
         "Comandos:\n"
-        "🔍 /check - Inicia a varredura da fila\n"
-        "📊 /status - Veja quantos itens estão na fila\n"
-        "🗑️ /clear - Limpa a fila atual"
+        "🔍 /check - Inicia a varredura\n"
+        "📊 /status - Ver fila\n"
+        "🗑️ /clear - Limpar fila"
     )
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
