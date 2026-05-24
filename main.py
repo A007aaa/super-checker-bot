@@ -14,7 +14,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configurações do Bot
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") # Removido o token fixo por segurança
+# Token atualizado para evitar conflitos de instância
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8785377732:AAEq7f-65k_Obwy9xhmBgKEoGBO8qOhkQys")
 if not TELEGRAM_BOT_TOKEN:
     logger.critical("TELEGRAM_BOT_TOKEN não configurado. O bot não pode iniciar.")
     exit(1)
