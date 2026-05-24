@@ -82,27 +82,30 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     # Processamento em lotes para não travar o bot
     for i, val in enumerate(items_list):
-        # Determina o tipo com base no formato (heurística simples já que o pool só guarda o valor)
-        item_type = "SEED" if len(val.split()) >= 12 else "KEY_SOL"
+        # Determina o tipo com base no formato
+        words_count = len(val.split())
+        item_type = "SEED" if words_count in [12, 15, 18, 21, 24] else "KEY_SOL"
         if len(val) == 64 and " " not in val:
             item_type = "KEY_HEX"
 
         try:
+            # Feedback visual imediato para cada item processado se a lista for pequena
             res = await check_balance_master(item_type, val)
             if res:
                 found_count += 1
                 seed_val, balances = res
                 msg = f"🎯 **SALDO ENCONTRADO!** ({item_type})\n`{seed_val}`\n"
-                # Agrupar por moeda para encurtar a mensagem se houver muitos endereços
                 for coin, addr, bal in balances:
                     msg += f"• **{coin}**: `{bal}`\n  └ Endereço: `{addr}`\n"
                 await update.message.reply_text(msg)
         except Exception as e:
-            logger.error(f"Erro ao verificar: {e}")
+            logger.error(f"Erro ao verificar item {i}: {e}")
         
-        if (i + 1) % 10 == 0 or (i + 1) == total:
-            percent = int(((i + 1) / total) * 100)
-            await status_msg.edit_text(f"🔍 Progresso: {percent}% ({i+1}/{total})\n🎯 Encontrados: {found_count}")
+        # Atualiza status com mais frequência para evitar que o usuário ache que o bot travou
+        percent = int(((i + 1) / total) * 100)
+        try:
+            await status_msg.edit_text(f"🔍 Progresso: {percent}% ({i+1}/{total})\n🎯 Encontrados: {found_count}\n⏳ Processando: `{val[:20]}...`")
+        except: pass # Evita erro se a mensagem de status for igual à anterior
 
     await update.message.reply_text(f"✅ Varredura concluída!\nItens processados: {total}\nSaldos positivos: {found_count}")
     user_pools[user_id] = set()
