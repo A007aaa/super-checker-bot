@@ -11,25 +11,33 @@ from seed_extractor import SeedExtractor
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# SEGURANÇA: Token removido do código. Use a variável de ambiente TELEGRAM_BOT_TOKEN.
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-
-if not TELEGRAM_BOT_TOKEN:
-    logger.error("ERRO: Variável de ambiente TELEGRAM_BOT_TOKEN não configurada!")
-    # Para evitar crash imediato em ambientes de dev, mas alertar o usuário
-    TELEGRAM_BOT_TOKEN = "COLOQUE_SEU_TOKEN_AQUI_OU_USE_ENV_VAR"
+# Configurações do Bot
+TELEGRAM_BOT_TOKEN = "8785377732:AAGgt1tT7eFDzJnaQKISrgKHP7k3C5M4nBs"
+ALLOWED_USER_ID = 8422682029  # Trava de segurança: apenas este ID pode usar o bot
 
 extractor = SeedExtractor()
 user_pools = {}
 
+async def is_authorized(update: Update) -> bool:
+    """Verifica se o usuário está autorizado."""
+    user_id = update.effective_user.id
+    if user_id != ALLOWED_USER_ID:
+        logger.warning(f"Acesso negado para o usuário: {user_id}")
+        await update.message.reply_text("⛔ **ACESSO NEGADO.** Este bot é privado.")
+        return False
+    return True
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_authorized(update): return
     await update.message.reply_text("🔥 **MODO MASTER ATIVADO!** 🔥\nDetectando Seeds, Chaves Privadas Solana e ETH.\nFoco: BTC, ETH, SOL, ADA, USDT, TRON.\n\nEnvie o texto e use /check.")
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_authorized(update): return
     user_pools[update.effective_user.id] = []
     await update.message.reply_text("🗑️ Memória limpa.")
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_authorized(update): return
     user_id = update.effective_user.id
     text = " ".join(user_pools.get(user_id, []))
     if not text:
@@ -63,6 +71,7 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(f"✅ Fim da varredura! Itens: {total} | Achados: {found_count}")
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_authorized(update): return
     user_id = update.effective_user.id
     if user_id not in user_pools: user_pools[user_id] = []
     
@@ -80,17 +89,13 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"📥 Recebido. (Total acumulado: {len(user_pools[user_id])} mensagens)")
 
 def main():
-    if "COLOQUE_SEU_TOKEN_AQUI" in TELEGRAM_BOT_TOKEN:
-        print("Por favor, configure a variável de ambiente TELEGRAM_BOT_TOKEN.")
-        return
-
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check_pool))
     app.add_handler(CommandHandler("clear", clear_pool))
     app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_input))
     
-    print("Bot iniciado...")
+    print("Bot iniciado com trava de segurança...")
     app.run_polling()
 
 if __name__ == "__main__": main()
