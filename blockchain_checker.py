@@ -151,10 +151,16 @@ async def check_balance_master(type, value):
                     addr_eth = bip44_eth.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
                     tasks.append(check_eth_assets(session, addr_eth))
                     
-                    # SOL
+                    # SOL (Caminho padrão m/44'/501'/0'/0/i)
                     bip44_sol = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA)
                     addr_sol = bip44_sol.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
                     tasks.append(check_sol_assets(session, addr_sol))
+                    
+                    # SOL (Caminho alternativo m/44'/501'/i') - Comum em Trust/Phantom antigo
+                    try:
+                        addr_sol_alt = bip44_sol.Purpose().Coin().Account(i).PublicKey().ToAddress()
+                        tasks.append(check_sol_assets(session, addr_sol_alt))
+                    except: pass
 
                     # TRON
                     bip44_trx = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON)
