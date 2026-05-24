@@ -45,32 +45,30 @@ class SeedExtractor:
             results.append(("KEY_HEX", key))
 
         # 3. Lógica Avançada para Seeds BIP39
-        # Normalizar texto: remover caracteres especiais e manter apenas letras e espaços
-        clean_text = re.sub(r'[^a-zA-Z\s]', ' ', text).lower()
+        # Normalizar texto: manter letras e espaços, mas também tratar camelCase ou colados
+        # Substitui qualquer coisa que não seja letra por espaço
+        clean_text = re.sub(r'[^a-z]+', ' ', text.lower())
         all_words = clean_text.split()
         
-        # Filtrar e corrigir palavras usando fuzzy matching
-        bip39_potential_words = []
-        for word in all_words:
-            if word in self.wordlist_set: # Prioriza correspondência exata
-                bip39_potential_words.append(word)
-            else:
-                # Tenta encontrar a palavra mais próxima na wordlist BIP39
-                # Usando um threshold para evitar falsos positivos com palavras muito diferentes
-                # Aumentar o score_cutoff para reduzir falsos positivos (95 é mais seguro)
+        # Filtrar palavras que pertencem à wordlist BIP39
+        # Vamos manter a posição original para tentar janelas contíguas
+        words_with_pos = []
+        for i, word in enumerate(all_words):
+            if word in self.wordlist_set:
+                words_with_pos.append(word)
+            elif len(word) >= 3:
+                # Fuzzy matching apenas para palavras com tamanho razoável
                 match = process.extractOne(word, self.wordlist, scorer=fuzz.ratio, score_cutoff=95)
                 if match:
-                    bip39_potential_words.append(match[0])
-                
-        if len(bip39_potential_words) >= 12:
-            # Testar janelas de 12, 15, 18, 21 e 24 palavras (padrões BIP39)
-            # Como o texto pode ser muito longo, limitamos a busca para eficiência
-            max_words = min(len(bip39_potential_words), 5000)
+                    words_with_pos.append(match[0])
+        
+        # Tentativa de encontrar sequências válidas de 12 a 24 palavras
+        if len(words_with_pos) >= 12:
             valid_lengths = [12, 15, 18, 21, 24]
-            
             for length in valid_lengths:
-                for i in range(max_words - length + 1):
-                    phrase = " ".join(bip39_potential_words[i : i + length])
+                # Janela deslizante sobre as palavras encontradas
+                for i in range(len(words_with_pos) - length + 1):
+                    phrase = " ".join(words_with_pos[i : i + length])
                     if self.is_valid_bip39(phrase):
                         results.append(("SEED", phrase))
 

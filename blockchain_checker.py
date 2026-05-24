@@ -107,8 +107,8 @@ async def check_balance_master(type, value):
             try:
                 seed_bytes = Bip39SeedGenerator(value).Generate()
                 
-                # Verificando os primeiros 10 endereços para cada padrão comum
-                for i in range(10):
+                # Verificando os primeiros 20 endereços para cada padrão comum (Aumentado para achar saldos menores/escondidos)
+                for i in range(20):
                     # BTC Native Segwit (BIP84) - bc1...
                     bip84_mst = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN)
                     addr_btc = bip84_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
