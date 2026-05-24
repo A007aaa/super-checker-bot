@@ -35,6 +35,7 @@ async def save_result(user_id, seed, found_list):
 
 async def process_seed_silent(user_id, seed, update):
     try:
+        logger.info(f"Verificando seed: {seed[:20]}...")
         res = await check_balance_all(seed)
         if res:
             seed, found = res
@@ -57,6 +58,7 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     full_text = " ".join(words)
     seeds = extractor.extract_all_seeds(full_text)
     total = len(seeds)
+    logger.info(f"Total de seeds extraídas para processamento: {total}")
     
     status_msg = await update.message.reply_text(f"⚡ **HYPER TURBO:** Verificando {total} seeds...")
 
