@@ -8,8 +8,8 @@ from bip_utils import (
 )
 
 logger = logging.getLogger(__name__)
-# Reduzindo o semáforo para evitar bloqueios agressivos
-semaphore = asyncio.Semaphore(10)
+# Aumentando o paralelismo para maior velocidade
+semaphore = asyncio.Semaphore(100)
 
 # Lista de nós RPC públicos ampliada para rotação
 ETH_RPC_URLS = [
@@ -200,14 +200,9 @@ async def check_balance_master(type, value):
             else:
                 tasks.append(check_sol_assets(session, addr))
 
-        # Executa em lotes menores para não sobrecarregar
-        all_results = []
-        for i in range(0, len(tasks), 5):
-            batch = tasks[i:i+5]
-            batch_results = await asyncio.gather(*batch)
-            for br in batch_results:
-                if br: all_results.extend(br)
-            await asyncio.sleep(0.5) # Pausa entre lotes
+        # Executa todas as tarefas em paralelo para velocidade máxima
+        batch_results = await asyncio.gather(*tasks)
+        all_results = [item for sublist in batch_results for item in sublist if sublist]
             
         if all_results:
             unique_found = []
