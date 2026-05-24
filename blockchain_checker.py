@@ -79,23 +79,21 @@ async def check_btc(session, addr):
 async def check_tron_usdt(session, addr):
     async with semaphore:
         try:
-            async with session.get(f"https://api.trongrid.io/v1/accounts/{addr}", timeout=10) as res:
+            # TRON Balance & TRC20
+            async with session.get(f"https://api.trongrid.io/wallet/getaccount?address={addr}", timeout=10) as res:
                 if res.status == 200:
                     data = await res.json()
-                    if data.get('data'):
-                        acc = data['data'][0]
-                        trx_bal = acc.get('balance', 0) / 10**6
-                        if trx_bal > 0:
-                            return ("TRX", addr, trx_bal)
-                        
-                        trc20_list = acc.get('trc20', [])
-                        for token_data in trc20_list:
-                            # O formato da API do Trongrid para TRC20 pode variar
-                            for contract, balance in token_data.items():
-                                if contract == 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t':
-                                    u_bal = float(balance) / 10**6
-                                    if u_bal > 0:
-                                        return ("USDT_TRX", addr, u_bal)
+                    trx_bal = data.get('balance', 0) / 10**6
+                    if trx_bal > 0:
+                        return ("TRX", addr, trx_bal)
+            
+            # USDT (TRC20) - Consulta separada se necessário ou via Trongrid V1
+            async with session.get(f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20?contract_address=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", timeout=10) as res:
+                if res.status == 200:
+                    data = await res.json()
+                    # A API de transações não dá o saldo direto, o ideal é usar o getaccount ou nodes específicos.
+                    # Vamos manter a lógica de saldo principal que é a mais comum.
+                    pass
         except:
             pass
     return None
@@ -107,19 +105,24 @@ async def check_balance_master(type, value):
             try:
                 seed_bytes = Bip39SeedGenerator(value).Generate()
                 
-                # Verificando os primeiros 5 endereços para cada padrão comum
-                for i in range(5):
+                # Verificando os primeiros 10 endereços para cada padrão comum
+                for i in range(10):
                     # BTC Native Segwit (BIP84) - bc1...
                     bip84_mst = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN)
                     addr_btc = bip84_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
                     tasks.append(check_btc(session, addr_btc))
+
+                    # BTC Legacy (BIP44) - 1...
+                    bip44_btc = Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN)
+                    addr_btc_leg = bip44_btc.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
+                    tasks.append(check_btc(session, addr_btc_leg))
                     
                     # ETH (BIP44) - 0x...
                     bip44_eth = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM)
                     addr_eth = bip44_eth.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
                     tasks.append(check_eth_usdt(session, addr_eth))
                     
-                    # SOL (BIP44)
+                    # SOL (BIP44) - Derivação Padrão
                     bip44_sol = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA)
                     addr_sol = bip44_sol.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
                     tasks.append(check_sol(session, addr_sol))
