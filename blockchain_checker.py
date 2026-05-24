@@ -11,20 +11,20 @@ from bip_utils import (
     Bip32Utils, SolAddr
 )
 
-# ── Configurações de Varredura ──────────────────────────────────────────────
-REQUEST_TIMEOUT   = 10          
-SEED_TIMEOUT      = 120         
-MAX_CONCURRENT_REQUESTS = 30    
-GAP_LIMIT = 5                   # Quantidade de endereços por conta
-MAX_ACCOUNTS = 2                # Quantidade de contas por seed
+# ── Otimização de Performance ──────────────────────────────────────────────
+REQUEST_TIMEOUT   = 5           # Reduzido para não travar em RPCs lentos
+SEED_TIMEOUT      = 60          # Reduzido para acelerar o ciclo total
+MAX_CONCURRENT_REQUESTS = 100   # Aumentado drasticamente para alta performance
+GAP_LIMIT = 1                   # Focar apenas no endereço principal para velocidade máxima
+MAX_ACCOUNTS = 1                # Focar apenas na conta principal
 # ────────────────────────────────────────────────────────────────────────────
 
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 RPC_URLS = {
-    "BSC": ["https://bsc-dataseed.binance.org/", "https://bsc-dataseed1.defibit.io/"],
-    "POLYGON": ["https://polygon-rpc.com/", "https://rpc-mainnet.maticvigil.com/"],
-    "ETH": ["https://cloudflare-eth.com/", "https://eth-mainnet.public.blastapi.io"],
+    "BSC": ["https://bsc-dataseed.binance.org/"],
+    "POLYGON": ["https://polygon-rpc.com/"],
+    "ETH": ["https://cloudflare-eth.com/"],
     "ARBITRUM": ["https://arb1.arbitrum.io/rpc"],
     "OPTIMISM": ["https://mainnet.optimism.io"],
     "BASE": ["https://mainnet.base.org"],
@@ -41,68 +41,55 @@ USDT_CONTRACTS = {
 async def _rpc_call(session, urls, method, params):
     async with semaphore:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        random.shuffle(urls)
-        for url in urls:
-            try:
-                async with session.post(url, json=payload, timeout=REQUEST_TIMEOUT) as res:
-                    if res.status == 200:
-                        data = await res.json()
-                        if 'result' in data: return data
-            except Exception: continue
+        url = random.choice(urls)
+        try:
+            async with session.post(url, json=payload, timeout=REQUEST_TIMEOUT) as res:
+                if res.status == 200:
+                    data = await res.json()
+                    return data.get('result')
+        except Exception: pass
         return None
 
 async def get_universal_addresses(seed_phrase):
     try:
+        # Gerar seed bytes uma única vez para todas as moedas
         seed_bytes = Bip39SeedGenerator(seed_phrase).Generate()
     except Exception: return []
     
     addr_map = []
-    for account_idx in range(MAX_ACCOUNTS):
-        for address_idx in range(GAP_LIMIT):
-            # BTC
-            try:
-                addr_map.append(("BTC", "Native", Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
-                addr_map.append(("BTC", "P2SH", Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
-                addr_map.append(("BTC", "Legacy", Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
-            except Exception: pass
+    # BTC Native SegWit (mais comum hoje)
+    try:
+        addr_map.append(("BTC", "Native", Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()))
+    except Exception: pass
 
-            # LTC & DOGE
-            try:
-                addr_map.append(("LTC", "Native", Bip84.FromSeed(seed_bytes, Bip84Coins.LITECOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
-                addr_map.append(("DOGE", "Legacy", Bip44.FromSeed(seed_bytes, Bip44Coins.DOGECOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
-            except Exception: pass
+    # EVM (Cobre todas as redes compatíveis com Ethereum)
+    try:
+        eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
+        addr_map.append(("EVM", "ADDR", eth_addr))
+    except Exception: pass
 
-            # EVM
-            try:
-                eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
-                addr_map.append(("EVM", "ADDR", eth_addr))
-            except Exception: pass
+    # Solana
+    try:
+        sol_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+        sol_addr = SolAddr.Encode(sol_ctx.PublicKey().Raw().ToBytes())
+        addr_map.append(("SOL", "ADDR", sol_addr))
+    except Exception: pass
 
-            # Solana
-            try:
-                sol_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx)
-                sol_addr = SolAddr.Encode(sol_ctx.PublicKey().Raw().ToBytes())
-                addr_map.append(("SOL", "ADDR", sol_addr))
-            except Exception: pass
-
-            # Tron
-            try:
-                trx_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
-                addr_map.append(("TRX", "STD", trx_addr))
-            except Exception: pass
+    # Tron
+    try:
+        trx_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
+        addr_map.append(("TRX", "STD", trx_addr))
+    except Exception: pass
 
     return addr_map
 
-async def check_generic_insight(session, coin, addr, api_url):
+async def check_btc(session, addr):
     async with semaphore:
         try:
-            async with session.get(api_url.format(addr=addr), timeout=REQUEST_TIMEOUT) as res:
+            async with session.get(f"https://blockchain.info/q/addressbalance/{addr}", timeout=REQUEST_TIMEOUT) as res:
                 if res.status == 200:
-                    data = await res.json()
-                    if "final_balance" in data: bal = data["final_balance"] / 10**8
-                    elif "balance" in data: bal = float(data["balance"]) / 10**8
-                    else: return None
-                    if bal > 0: return (coin, addr, bal)
+                    bal = int(await res.text()) / 10**8
+                    if bal > 0: return ("BTC", addr, bal)
         except Exception: pass
         return None
 
@@ -118,46 +105,32 @@ async def check_solana(session, addr):
         except Exception: pass
         return None
 
-async def check_evm_full(session, addr):
+async def check_evm_quick(session, addr):
     results = []
+    # Verificar apenas as 3 redes principais para velocidade, ou todas em paralelo
+    tasks = []
     for net, urls in RPC_URLS.items():
-        data = await _rpc_call(session, urls, "eth_getBalance", [addr, "latest"])
-        if data and 'result' in data:
-            bal = int(data['result'], 16) / 10**18
-            if bal > 0: results.append((net, addr, bal))
-        
-        contract = USDT_CONTRACTS.get(net)
-        if contract:
-            call_data = "0x70a08231" + addr[2:].zfill(64)
-            t_data = await _rpc_call(session, urls, "eth_call", [{"to": contract, "data": call_data}, "latest"])
-            if t_data and 'result' in t_data and t_data['result'] != '0x':
-                t_bal = int(t_data['result'], 16) / 10**6
-                if t_bal > 0: results.append((f"USDT_{net}", addr, t_bal))
+        tasks.append(_rpc_call(session, urls, "eth_getBalance", [addr, "latest"]))
+    
+    rpc_results = await asyncio.gather(*tasks)
+    for i, res in enumerate(rpc_results):
+        if res and res != '0x0':
+            bal = int(res, 16) / 10**18
+            if bal > 0: results.append((list(RPC_URLS.keys())[i], addr, bal))
     return results
 
-async def check_trx(session, addr):
+async def check_trx_quick(session, addr):
     async with semaphore:
-        results = []
         try:
             async with session.get(f"https://api.trongrid.io/v1/accounts/{addr}", timeout=REQUEST_TIMEOUT) as res:
                 if res.status == 200:
                     data = await res.json()
-                    if data.get('data') and len(data['data']) > 0:
+                    if data.get('data'):
                         acc = data['data'][0]
-                        bal_trx = acc.get('balance', 0) / 10**6
-                        if bal_trx > 0: results.append(("TRX", addr, bal_trx))
-                        
-                        trc20_list = acc.get('trc20', [])
-                        for token_data in trc20_list:
-                            for contract, val in token_data.items():
-                                try:
-                                    token_bal = float(val) / 10**6
-                                    if token_bal > 0:
-                                        symbol = "USDT" if contract == 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' else "TRC20"
-                                        results.append((symbol, addr, token_bal))
-                                except: continue
+                        bal = acc.get('balance', 0) / 10**6
+                        if bal > 0: return [("TRX", addr, bal)]
         except Exception: pass
-        return results
+        return []
 
 async def check_balance_all(seed):
     seed = seed.strip()
@@ -168,11 +141,9 @@ async def check_balance_all(seed):
     async with aiohttp.ClientSession() as session:
         tasks = []
         for coin, label, addr in addr_map:
-            if coin == "BTC": tasks.append(check_generic_insight(session, "BTC", addr, "https://blockchain.info/balance?active={addr}"))
-            elif coin == "LTC": tasks.append(check_generic_insight(session, "LTC", addr, "https://api.blockcypher.com/v1/ltc/main/addrs/{addr}/balance"))
-            elif coin == "DOGE": tasks.append(check_generic_insight(session, "DOGE", addr, "https://api.blockcypher.com/v1/doge/main/addrs/{addr}/balance"))
-            elif coin == "EVM": tasks.append(check_evm_full(session, addr))
-            elif coin == "TRX": tasks.append(check_trx(session, addr))
+            if coin == "BTC": tasks.append(check_btc(session, addr))
+            elif coin == "EVM": tasks.append(check_evm_quick(session, addr))
+            elif coin == "TRX": tasks.append(check_trx_quick(session, addr))
             elif coin == "SOL": tasks.append(check_solana(session, addr))
         
         try:
@@ -184,13 +155,5 @@ async def check_balance_all(seed):
         if item and not isinstance(item, Exception):
             if isinstance(item, list): found.extend(item)
             else: found.append(item)
-    
-    unique_found = []
-    seen_results = set()
-    for coin, addr, bal in found:
-        key = (coin, addr)
-        if key not in seen_results:
-            unique_found.append((coin, addr, bal))
-            seen_results.add(key)
             
-    return (seed, unique_found) if unique_found else None
+    return (seed, found) if found else None

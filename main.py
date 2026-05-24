@@ -15,7 +15,7 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8785377732:AAGgt1tT7eFDzJn
 extractor = SeedExtractor()
 
 user_word_pools = {}
-MAX_PARALLEL_SEEDS = 20  # Aumentado para lidar com o volume da sopa de letras
+MAX_PARALLEL_SEEDS = 50  # Aumentado drasticamente para velocidade máxima na sopa de letras
 def get_results_file_path(user_id):
     return f"achados_com_saldo_{user_id}.txt"
 
