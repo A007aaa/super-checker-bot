@@ -13,8 +13,8 @@ from bip_utils import (
 
 # ── Hyper Turbo Tunables ────────────────────────────────────────────────────
 REQUEST_TIMEOUT   = 10          # Aumentado para acomodar RPCs mais lentos, especialmente para Tron
-SEED_TIMEOUT      = 60          # Aumentado para suportar varredura profunda
-MAX_CONCURRENT_REQUESTS = 5     # Reduzido drasticamente para evitar status 429 (Too Many Requests)
+SEED_TIMEOUT      = 120         # Aumentado para suportar varredura exaustiva sem interrupções
+MAX_CONCURRENT_REQUESTS = 10    # Aumentado levemente para maior velocidade, mantendo segurança contra 429
 CHECK_INDEX_COUNT = 1           # Foco total no endereço #0 (Velocidade Máxima)
 GAP_LIMIT = 10                  # Aumentado para maior assertividade, especialmente para Tron
 MAX_ACCOUNTS = 3                # Aumentado para maior assertividade
