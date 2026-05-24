@@ -106,9 +106,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Opcional: Auto-check se encontrar algo importante imediatamente
     items = extractor.extract_all(text)
     if items:
-        await update.message.reply_text(f"📥 {len(items)} itens detectados e salvos. Use /check para analisar.")
+        await update.message.reply_text(f"📥 {len(items)} itens detectados (Seeds/Keys). Use /check para iniciar a varredura.")
     else:
-        await update.message.reply_text("📝 Texto adicionado à memória. Continue enviando ou use /check.")
+        await update.message.reply_text("📝 Texto recebido. Nenhuma Seed óbvia detectada, mas o texto foi salvo na memória. Continue enviando ou use /check.")
 
 async def main():
     if not TELEGRAM_BOT_TOKEN:
