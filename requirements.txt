@@ -1,4 +1,4 @@
-python-telegram-bot==22.7
+python-telegram-bot==21.10
 requests==2.31.0
 ecdsa
 base58==2.1.1
