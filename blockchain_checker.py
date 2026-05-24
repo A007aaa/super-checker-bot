@@ -8,10 +8,9 @@ from bip_utils import (
 )
 
 logger = logging.getLogger(__name__)
-# Aumentando o paralelismo para maior velocidade
-semaphore = asyncio.Semaphore(100)
+# Semáforo equilibrado para não ser banido instantaneamente
+semaphore = asyncio.Semaphore(30)
 
-# Lista de nós RPC públicos ampliada para rotação
 ETH_RPC_URLS = [
     "https://cloudflare-eth.com/",
     "https://eth.llamarpc.com",
@@ -28,27 +27,27 @@ SOL_RPC_URLS = [
     "https://solana.publicnode.com"
 ]
 
-async def fetch_post(session, urls, payload, retries=3):
-    # Embaralha as URLs para não usar sempre a mesma e ser bloqueado
+async def fetch_post(session, urls, payload, retries=5):
     random.shuffle(urls)
-    for url in urls:
-        for attempt in range(retries):
-            try:
-                async with session.post(url, json=payload, timeout=15) as res:
-                    if res.status == 200:
-                        return await res.json()
-                    elif res.status == 429: # Rate Limit
-                        await asyncio.sleep(2 ** attempt) # Backoff exponencial
-                        continue
-            except:
-                await asyncio.sleep(1)
-                continue
+    for attempt in range(retries):
+        url = urls[attempt % len(urls)]
+        try:
+            async with session.post(url, json=payload, timeout=15) as res:
+                if res.status == 200:
+                    data = await res.json()
+                    if data and 'result' in data:
+                        return data
+                elif res.status == 429: # Rate Limit
+                    await asyncio.sleep(1 * (attempt + 1))
+                    continue
+        except:
+            await asyncio.sleep(0.5)
+            continue
     return None
 
 async def check_sol_assets(session, addr):
     async with semaphore:
         results = []
-        # SOL Balance
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [addr]}
         data = await fetch_post(session, SOL_RPC_URLS, payload)
         if data and 'result' in data and data['result'] is not None:
@@ -56,7 +55,6 @@ async def check_sol_assets(session, addr):
             if val and val > 0:
                 results.append(("SOL", addr, val / 10**9))
 
-        # SPL Tokens (USDT & USDC)
         payload_tokens = {
             "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
             "params": [addr, {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}, {"encoding": "jsonParsed"}]
@@ -79,7 +77,6 @@ async def check_sol_assets(session, addr):
 async def check_eth_assets(session, addr):
     async with semaphore:
         results = []
-        # ETH Balance
         payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [addr, "latest"]}
         data = await fetch_post(session, ETH_RPC_URLS, payload)
         if data and 'result' in data:
@@ -89,7 +86,6 @@ async def check_eth_assets(session, addr):
                     results.append(("ETH", addr, bal))
             except: pass
 
-        # ERC20 Tokens
         tokens = {
             "USDT_ETH": ("0xdac17f958d2ee523a2206206994597c13d831ec7", 6),
             "USDC_ETH": ("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", 6)
@@ -108,21 +104,21 @@ async def check_eth_assets(session, addr):
 
 async def check_btc(session, addr):
     async with semaphore:
-        for attempt in range(3):
+        # Usando BlockCypher como primário por ser mais estável para BTC
+        url = f"https://api.blockcypher.com/v1/btc/main/addrs/{addr}/balance"
+        try:
+            async with session.get(url, timeout=15) as res:
+                if res.status == 200:
+                    data = await res.json()
+                    bal = data.get('balance', 0) / 10**8
+                    if bal > 0: return [("BTC", addr, bal)]
+        except:
             try:
-                # Alternando entre Blockchain.info e BlockCypher para evitar limites
-                url = f"https://blockchain.info/q/addressbalance/{addr}" if attempt % 2 == 0 else f"https://api.blockcypher.com/v1/btc/main/addrs/{addr}/balance"
-                async with session.get(url, timeout=15) as res:
+                async with session.get(f"https://blockchain.info/q/addressbalance/{addr}", timeout=10) as res:
                     if res.status == 200:
-                        data = await res.json() if "blockcypher" in url else await res.text()
-                        bal = (data.get('balance', 0) if isinstance(data, dict) else int(data)) / 10**8
-                        if bal > 0:
-                            return [("BTC", addr, bal)]
-                        return []
-                    elif res.status == 429:
-                        await asyncio.sleep(2)
-            except:
-                await asyncio.sleep(1)
+                        bal = int(await res.text()) / 10**8
+                        if bal > 0: return [("BTC", addr, bal)]
+            except: pass
         return []
 
 async def check_tron_assets(session, addr):
@@ -135,8 +131,7 @@ async def check_tron_assets(session, addr):
                     if data.get('success') and data.get('data'):
                         acc = data['data'][0]
                         trx_bal = acc.get('balance', 0) / 10**6
-                        if trx_bal > 0:
-                            results.append(("TRX", addr, trx_bal))
+                        if trx_bal > 0: results.append(("TRX", addr, trx_bal))
                         trc20_list = acc.get('trc20', [])
                         for token in trc20_list:
                             for contract, balance in token.items():
@@ -155,15 +150,12 @@ async def check_balance_master(type, value):
         if type == "SEED":
             try:
                 seed_bytes = Bip39SeedGenerator(value).Generate()
-                # Reduzindo para 20 endereços por vez para evitar banimento por IP, mas com maior qualidade de verificação
-                for i in range(20):
-                    # BTC (BIP84, BIP44)
-                    for coin_type in [Bip84Coins.BITCOIN, Bip44Coins.BITCOIN]:
-                        try:
-                            mst = Bip84.FromSeed(seed_bytes, coin_type) if coin_type == Bip84Coins.BITCOIN else Bip44.FromSeed(seed_bytes, coin_type)
-                            addr = mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
-                            tasks.append(check_btc(session, addr))
-                        except: continue
+                # Reduzindo para 10 endereços por rede para garantir qualidade e evitar banimento
+                for i in range(10):
+                    # BTC
+                    bip84_btc = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN)
+                    addr_btc = bip84_btc.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
+                    tasks.append(check_btc(session, addr_btc))
                     
                     # ETH
                     bip44_eth = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM)
@@ -174,12 +166,6 @@ async def check_balance_master(type, value):
                     bip44_sol = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA)
                     addr_sol = bip44_sol.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
                     tasks.append(check_sol_assets(session, addr_sol))
-                    
-                    # SOL ALT
-                    try:
-                        addr_sol_alt = bip44_sol.Purpose().Coin().Account(i).PublicKey().ToAddress()
-                        tasks.append(check_sol_assets(session, addr_sol_alt))
-                    except: pass
 
                     # TRON
                     bip44_trx = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON)
@@ -191,16 +177,11 @@ async def check_balance_master(type, value):
                 return None
         else:
             addr = value
-            if addr.startswith('0x'):
-                tasks.append(check_eth_assets(session, addr))
-            elif addr.startswith('T'):
-                tasks.append(check_tron_assets(session, addr))
-            elif addr.startswith('1') or addr.startswith('3') or addr.startswith('bc1'):
-                tasks.append(check_btc(session, addr))
-            else:
-                tasks.append(check_sol_assets(session, addr))
+            if addr.startswith('0x'): tasks.append(check_eth_assets(session, addr))
+            elif addr.startswith('T'): tasks.append(check_tron_assets(session, addr))
+            elif addr.startswith('1') or addr.startswith('3') or addr.startswith('bc1'): tasks.append(check_btc(session, addr))
+            else: tasks.append(check_sol_assets(session, addr))
 
-        # Executa todas as tarefas em paralelo para velocidade máxima
         batch_results = await asyncio.gather(*tasks)
         all_results = [item for sublist in batch_results for item in sublist if sublist]
             

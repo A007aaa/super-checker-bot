@@ -90,8 +90,8 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as e:
             logger.error(f"Erro ao verificar item {i}: {e}")
 
-    # Criar tarefas para todas as seeds e processar em paralelo (lotes de 10 seeds simultâneas)
-    batch_size = 10
+    # Processamento equilibrado: 3 seeds por vez para evitar bloqueio mas manter velocidade
+    batch_size = 3
     for i in range(0, total, batch_size):
         batch = items_list[i:i+batch_size]
         tasks = [check_and_report(i + j, val) for j, val in enumerate(batch)]
@@ -100,8 +100,11 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # Atualiza status após cada lote
         percent = min(100, int(((i + batch_size) / total) * 100))
         try:
-            await status_msg.edit_text(f"🚀 MODO TURBO: {percent}% ({min(i+batch_size, total)}/{total})\n🎯 Encontrados: {found_count}")
+            await status_msg.edit_text(f"🔍 Progresso: {percent}% ({min(i+batch_size, total)}/{total})\n🎯 Encontrados: {found_count}")
         except: pass
+        
+        # Pequena pausa para as APIs respirarem
+        await asyncio.sleep(1)
 
     await update.message.reply_text(f"✅ Varredura concluída!\nItens processados: {total}\nSaldos positivos: {found_count}")
     user_pools[user_id] = set()
