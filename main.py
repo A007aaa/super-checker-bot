@@ -13,15 +13,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configurações do Bot - RECOMENDADO USAR VARIÁVEIS DE AMBIENTE
+# Configurações do Bot
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8785377732:AAGgt1tT7eFDzJnaQKISrgKHP7k3C5M4nBs")
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "8422682029"))
 
 extractor = SeedExtractor()
+# Agora o pool guarda apenas os ITENS ÚNICOS extraídos (Seeds/Keys), não o texto bruto.
+# Isso economiza MUITA memória.
 user_pools = {}
 
 async def is_authorized(update: Update) -> bool:
-    """Verifica se o usuário está autorizado."""
     if not update.effective_user:
         return False
     user_id = update.effective_user.id
@@ -36,42 +37,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
         return
     await update.message.reply_text(
-        "🔥 **MODO MASTER ATIVADO!** 🔥\n"
-        "Detectando Seeds, Chaves Privadas Solana e ETH.\n"
-        "Foco: BTC, ETH, SOL, ADA, USDT, TRON.\n\n"
-        "Envie texto ou arquivos .txt. Use /check para processar a memória."
+        "🚀 **SUPER CHECKER OTIMIZADO** 🚀\n\n"
+        "Envie textos ou vários arquivos `.txt` ao mesmo tempo.\n"
+        "O bot extrairá as Seeds automaticamente e as guardará na fila.\n\n"
+        "Comandos:\n"
+        "🔍 /check - Inicia a varredura da fila\n"
+        "📊 /status - Veja quantos itens estão na fila\n"
+        "🗑️ /clear - Limpa a fila atual"
     )
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
         return
     user_id = update.effective_user.id
-    user_pools[user_id] = []
-    await update.message.reply_text("🗑️ Memória limpa.")
+    user_pools[user_id] = set()
+    await update.message.reply_text("🗑️ Fila de verificação limpa.")
+
+async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_authorized(update):
+        return
+    user_id = update.effective_user.id
+    count = len(user_pools.get(user_id, set()))
+    await update.message.reply_text(f"📊 **Status da Fila:** {count} itens aguardando verificação.")
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
         return
     
     user_id = update.effective_user.id
-    pool_content = user_pools.get(user_id, [])
+    pool = user_pools.get(user_id, set())
     
-    if not pool_content:
-        await update.message.reply_text("❌ Nada para verificar na memória.")
+    if not pool:
+        await update.message.reply_text("❌ Nada para verificar na memória. Envie arquivos primeiro.")
         return
 
-    full_text = " ".join(pool_content)
-    items = extractor.extract_all(full_text)
-    total = len(items)
-
-    if total == 0:
-        await update.message.reply_text("❌ Nenhum item (Seed/Key) encontrado no texto enviado.")
-        return
-
-    status_msg = await update.message.reply_text(f"🔍 Analisando {total} itens encontrados...")
+    items_list = list(pool)
+    total = len(items_list)
+    await update.message.reply_text(f"🔍 Iniciando varredura de **{total}** itens únicos...")
+    
+    status_msg = await update.message.reply_text("⏳ Processando: 0%")
     found_count = 0
 
-    for i, (item_type, val) in enumerate(items):
+    # Processamento em lotes para não travar o bot
+    for i, item_val in enumerate(items_list):
+        temp_items = extractor.extract_all(item_val)
+        if not temp_items: continue
+        item_type, val = temp_items[0]
+
         try:
             res = await check_balance_master(item_type, val)
             if res:
@@ -82,14 +94,23 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     msg += f"• {coin}: {bal} (Endereço: `{addr}`)\n"
                 await update.message.reply_text(msg)
         except Exception as e:
-            logger.error(f"Erro ao verificar {item_type}: {e}")
+            logger.error(f"Erro ao verificar: {e}")
         
-        if (i + 1) % 5 == 0:
-            await status_msg.edit_text(f"🔍 Progresso: {i+1}/{total} | 🎯 Achados: {found_count}")
+        if (i + 1) % 10 == 0 or (i + 1) == total:
+            percent = int(((i + 1) / total) * 100)
+            await status_msg.edit_text(f"🔍 Progresso: {percent}% ({i+1}/{total})\n🎯 Encontrados: {found_count}")
 
     await update.message.reply_text(f"✅ Varredura concluída!\nItens processados: {total}\nSaldos positivos: {found_count}")
-    # Limpa o pool após a verificação
-    user_pools[user_id] = []
+    user_pools[user_id] = set()
+
+def add_to_pool(user_id, text):
+    if user_id not in user_pools:
+        user_pools[user_id] = set()
+    
+    items = extractor.extract_all(text)
+    for it_type, it_val in items:
+        user_pools[user_id].add(it_val) 
+    return len(items)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
@@ -98,83 +119,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id
     text = update.message.text
     
-    if user_id not in user_pools:
-        user_pools[user_id] = []
-    
-    user_pools[user_id].append(text)
-    
-    items = extractor.extract_all(text)
-    if items:
-        await update.message.reply_text(f"📥 {len(items)} itens detectados. Use /check para iniciar a varredura.")
+    added = add_to_pool(user_id, text)
+    if added > 0:
+        total = len(user_pools[user_id])
+        await update.message.reply_text(f"📥 {added} itens extraídos. Total na fila: {total}. Use /check para iniciar.")
     else:
-        await update.message.reply_text("📝 Texto recebido e salvo na memória. Use /check.")
+        await update.message.reply_text("📝 Texto recebido, mas nenhuma Seed/Key foi encontrada.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Novo handler para processar arquivos .txt"""
     if not await is_authorized(update):
         return
     
     user_id = update.effective_user.id
     document = update.message.document
     
-    # Verifica se é um arquivo .txt
     if not document.file_name.lower().endswith('.txt'):
-        await update.message.reply_text("❌ Por favor, envie apenas arquivos .txt.")
         return
 
-    status_msg = await update.message.reply_text(f"📥 Processando arquivo `{document.file_name}`...")
-    
     try:
-        # Baixa o arquivo para a memória
         file = await context.bot.get_file(document.file_id)
-        file_bytearray = await file.download_as_bytearray()
+        file_content = await file.download_as_bytearray()
         
-        # Tenta decodificar o conteúdo (UTF-8 é o padrão)
         try:
-            text = file_bytearray.decode('utf-8')
+            text = file_content.decode('utf-8')
         except UnicodeDecodeError:
-            # Caso falhe, tenta latin-1 (comum em arquivos Windows)
-            text = file_bytearray.decode('latin-1')
+            text = file_content.decode('latin-1')
         
-        if user_id not in user_pools:
-            user_pools[user_id] = []
+        added = add_to_pool(user_id, text)
+        total = len(user_pools[user_id])
         
-        user_pools[user_id].append(text)
-        
-        items = extractor.extract_all(text)
-        if items:
-            await status_msg.edit_text(f"✅ Arquivo `{document.file_name}` processado!\n{len(items)} itens detectados. Use /check para iniciar.")
-        else:
-            await status_msg.edit_text(f"✅ Arquivo `{document.file_name}` salvo na memória. Nenhuma Seed detectada. Use /check.")
+        if added > 0:
+            await update.message.reply_text(f"✅ `{document.file_name}`: {added} itens adicionados. Total na fila: {total}.")
             
     except Exception as e:
-        logger.error(f"Erro ao processar arquivo: {e}")
-        await status_msg.edit_text(f"❌ Erro ao processar o arquivo: {str(e)}")
+        logger.error(f"Erro no arquivo {document.file_name}: {e}")
 
 async def main():
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN não configurado!")
-        return
-
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("clear", clear_pool))
+    application.add_handler(CommandHandler("status", show_status))
     application.add_handler(CommandHandler("check", check_pool))
     
-    # Handler para mensagens de texto
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # NOVO: Handler para arquivos/documentos
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    logger.info("Bot iniciado com suporte a arquivos .txt...")
+    logger.info("Bot Master iniciado...")
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
     
-    # Mantém rodando
     while True:
         await asyncio.sleep(3600)
 
