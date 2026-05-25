@@ -16,8 +16,8 @@ from bip_utils import (
 REQUEST_TIMEOUT   = 10          # Tempo limite para cada requisição RPC
 SEED_TIMEOUT      = 120         # Tempo limite total para verificar uma seed
 MAX_CONCURRENT_REQUESTS = 3     # Reduzido para evitar 429 no Alchemy
-GAP_LIMIT = 10                  # Número de endereços a verificar por conta
-MAX_ACCOUNTS = 3                # Número de contas a verificar
+GAP_LIMIT = 5                   # Reduzido para velocidade e estabilidade
+MAX_ACCOUNTS = 1                # Focar na conta principal para evitar 429
 HEADERS = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
 
 RPC_URLS = {
