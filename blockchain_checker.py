@@ -21,10 +21,10 @@ MAX_ACCOUNTS = 3                # Número de contas a verificar
 HEADERS = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
 
 RPC_URLS = {
-    "BSC": ["https://bsc-dataseed.binance.org/", "https://bsc-dataseed1.defibit.io/", "https://bsc-dataseed1.ninicoin.io/"],
-    "POLYGON": ["https://polygon-rpc.com/", "https://rpc-mainnet.maticvigil.com/", "https://matic-mainnet.chainstacklabs.com/"],
-    "ETH": ["https://cloudflare-eth.com/", "https://eth-mainnet.public.blastapi.io/"],
-    "SOL": ["https://api.mainnet-beta.solana.com", "https://solana-mainnet.phantom.app/"],
+    "BSC": ["https://bnb-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8", "https://bsc-dataseed.binance.org/"],
+    "POLYGON": ["https://polygon-rpc.com/", "https://rpc-mainnet.maticvigil.com/"],
+    "ETH": ["https://eth-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8", "https://cloudflare-eth.com/"],
+    "SOL": ["https://solana-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8", "https://api.mainnet-beta.solana.com"],
     "SOL_DEVNET": ["https://api.devnet.solana.com"]
 }
 
@@ -208,8 +208,13 @@ async def check_solana(session, addr):
 async def check_trx(session, addr):
     async with semaphore:
         results = []
-        # Tenta TronGrid e se falhar (429), tenta a API pública da Tron
-        for api_url in [f"https://api.trongrid.io/v1/accounts/{addr}", f"https://api.tronstack.io/v1/accounts/{addr}"]:
+        # Tenta Alchemy Tron, TronGrid e se falhar (429), tenta a API pública da Tron
+        apis = [
+            f"https://tron-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8/v1/accounts/{addr}",
+            f"https://api.trongrid.io/v1/accounts/{addr}",
+            f"https://api.tronstack.io/v1/accounts/{addr}"
+        ]
+        for api_url in apis:
             try:
                 async with session.get(api_url, timeout=REQUEST_TIMEOUT) as res:
                     if res.status == 200:
