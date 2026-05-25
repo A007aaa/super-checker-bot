@@ -66,36 +66,47 @@ async def get_universal_addresses(seed_phrase):
     except Exception: return []
     
     addr_map = []
+    seen_addresses = set()
     for account_idx in range(MAX_ACCOUNTS):
         for address_idx in range(GAP_LIMIT):
             # BTC (BIP-44, BIP-49, BIP-84)
             try:
-                addr_map.append(("BTC", "Native", Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
-                addr_map.append(("BTC", "P2SH-SegWit", Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
-                addr_map.append(("BTC", "P2PKH", Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()))
+                for coin_type, coin_label in [(Bip84, "Native"), (Bip49, "P2SH-SegWit"), (Bip44, "P2PKH")]:
+                    addr = coin_type.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
+                    if addr not in seen_addresses:
+                        addr_map.append(("BTC", coin_label, addr))
+                        seen_addresses.add(addr)
             except Exception: pass
 
             # EVM (ETH, BSC, POLYGON) - BIP-44
             try:
                 eth_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
-                addr_map.append(("EVM", "ADDR", eth_addr))
+                if eth_addr not in seen_addresses:
+                    addr_map.append(("EVM", "ADDR", eth_addr))
+                    seen_addresses.add(eth_addr)
             except Exception: pass
 
             # Tron (Múltiplos Caminhos)
             try:
                 # 1. Padrão BIP-44 (m/44'/195'/0'/0/0)
                 trx_addr_std = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
-                addr_map.append(("TRX", "STD", trx_addr_std))
+                if trx_addr_std not in seen_addresses:
+                    addr_map.append(("TRX", "STD", trx_addr_std))
+                    seen_addresses.add(trx_addr_std)
                 
                 # 2. Alternativo (m/44'/195'/0'/0) - Comum em algumas carteiras
                 bip32_ctx = Bip32Utils.FromSeed(seed_bytes).DerivePath(f"m/44'/195'/{account_idx}'/0")
                 trx_addr_alt = Bip44.FromPublicKey(bip32_ctx.PublicKey().Raw().ToBytes(), Bip44Coins.TRON).PublicKey().ToAddress()
-                addr_map.append(("TRX", "ALT", trx_addr_alt))
+                if trx_addr_alt not in seen_addresses:
+                    addr_map.append(("TRX", "ALT", trx_addr_alt))
+                    seen_addresses.add(trx_addr_alt)
                 
                 # 3. Trust Wallet Style (Tron usando caminho de ETH: m/44'/60'/0'/0/index)
                 eth_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx)
                 trx_addr_trust = Bip44.FromPublicKey(eth_ctx.PublicKey().Raw().ToBytes(), Bip44Coins.TRON).PublicKey().ToAddress()
-                addr_map.append(("TRX", "TRUST", trx_addr_trust))
+                if trx_addr_trust not in seen_addresses:
+                    addr_map.append(("TRX", "TRUST", trx_addr_trust))
+                    seen_addresses.add(trx_addr_trust)
             except Exception: pass
 
     return addr_map

@@ -18,6 +18,10 @@ class SeedExtractor:
         except:
             return False
 
+    def extract_all_seeds(self, text):
+        results = self.extract_all(text)
+        return [val for type, val in results if type == "SEED"]
+
     def extract_all(self, text):
         if not text:
             return []

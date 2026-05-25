@@ -42,7 +42,7 @@ async def process_seed_silent(user_id, seed, update):
             await save_result(user_id, seed, found)
             msg = f"🎯 **SALDO ENCONTRADO!**\n`{seed}`\n"
             for c, a, b in found: msg += f"• {c}: {b}\n"
-            await update.message.reply_text(msg, parse_mode=\'Markdown\')
+            await update.message.reply_text(msg, parse_mode='Markdown')
             return True
     except Exception as e:
         logger.error(f"Erro ao processar seed {seed}: {e}")
@@ -78,7 +78,7 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 logger.warning(f"Erro ao enviar mensagem de progresso: {e}")
 
     if found_count > 0:
-        await update.message.reply_document(document=open(get_results_file_path(user_id), \'rb\'), caption=f"✅ Varredura Concluída! {found_count} saldos localizados.")
+        await update.message.reply_document(document=open(get_results_file_path(user_id), 'rb'), caption=f"✅ Varredura Concluída! {found_count} saldos localizados.")
     else:
         await update.message.reply_text(f"✅ Varredura Concluída. Total: {total} | Achados: 0")
 
@@ -91,13 +91,13 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         file = await context.bot.get_file(update.message.document.file_id)
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             await file.download_to_drive(tmp.name)
-            with open(tmp.name, \'r\', encoding=\'utf-8\', errors=\'ignore\') as f:
+            with open(tmp.name, 'r', encoding='utf-8', errors='ignore') as f:
                 text = f.read()
         os.unlink(tmp.name)
     else:
         text = update.message.text
 
-    new_words = re.findall(r\'\\b[a-z]+\\b\', text.lower())
+    new_words = re.findall(r'\b[a-z]+\b', text.lower())
     user_word_pools[user_id].extend(new_words)
     await update.message.reply_text(f"📥 {len(new_words)} palavras prontas. Use /check para iniciar.")
 
