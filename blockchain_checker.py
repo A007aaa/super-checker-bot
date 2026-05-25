@@ -3,6 +3,7 @@ import aiohttp
 import json
 import logging
 import random
+import time
 
 logger = logging.getLogger(__name__)
 from bip_utils import (
@@ -22,7 +23,9 @@ HEADERS = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
 RPC_URLS = {
     "BSC": ["https://bsc-dataseed.binance.org/", "https://bsc-dataseed1.defibit.io/", "https://bsc-dataseed1.ninicoin.io/"],
     "POLYGON": ["https://polygon-rpc.com/", "https://rpc-mainnet.maticvigil.com/", "https://matic-mainnet.chainstacklabs.com/"],
-    "ETH": ["https://cloudflare-eth.com/", "https://eth-mainnet.public.blastapi.io/"]
+    "ETH": ["https://cloudflare-eth.com/", "https://eth-mainnet.public.blastapi.io/"],
+    "SOL": ["https://api.mainnet-beta.solana.com", "https://solana-mainnet.phantom.app/"],
+    "SOL_DEVNET": ["https://api.devnet.solana.com"]
 }
 
 USDT_CONTRACTS = {
@@ -34,30 +37,51 @@ USDT_CONTRACTS = {
 
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
+# Blacklist temporária para RPCs com falha
+rpc_blacklist = {}
+BLACKLIST_TIME = 300 # 5 minutos
+
 async def _rpc_call(session, urls, method, params):
     async with semaphore:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        shuffled_urls = list(urls)
-        random.shuffle(shuffled_urls)
-        for url in shuffled_urls:
+        
+        # Filtra URLs blacklisted e embaralha as restantes
+        available_urls = [url for url in urls if url not in rpc_blacklist or (time.time() - rpc_blacklist[url]) > BLACKLIST_TIME]
+        if not available_urls:
+            logger.warning(f"Todas as URLs RPC para {method} estão na blacklist. Tentando novamente em breve.")
+            await asyncio.sleep(10) # Espera antes de tentar novamente se todas estiverem na blacklist
+            available_urls = [url for url in urls if url not in rpc_blacklist or (time.time() - rpc_blacklist[url]) > BLACKLIST_TIME]
+            if not available_urls: return None # Se ainda não houver URLs, desiste
+
+        random.shuffle(available_urls)
+
+        for url in available_urls:
             try:
                 async with session.post(url, json=payload, timeout=REQUEST_TIMEOUT) as res:
                     if res.status == 200:
                         data = await res.json()
-                        if 'result' in data: return data
+                        if 'result' in data: 
+                            if url in rpc_blacklist: del rpc_blacklist[url] # Remove da blacklist se funcionar
+                            return data
                     elif res.status == 429:
-                        logger.warning(f"RPC {url} retornou status 429 (Too Many Requests) para {method}")
+                        logger.warning(f"RPC {url} retornou status 429 (Too Many Requests) para {method}. Adicionando à blacklist temporária.")
+                        rpc_blacklist[url] = time.time()
                         await asyncio.sleep(random.uniform(2, 5)) # Espera e tenta outro RPC
                     else:
-                        logger.warning(f"RPC {url} retornou status {res.status} para {method}")
+                        logger.warning(f"RPC {url} retornou status {res.status} para {method}. Adicionando à blacklist temporária.")
+                        rpc_blacklist[url] = time.time()
             except asyncio.TimeoutError:
-                logger.warning(f"Timeout ao conectar com RPC {url} para {method}")
+                logger.warning(f"Timeout ao conectar com RPC {url} para {method}. Adicionando à blacklist temporária.")
+                rpc_blacklist[url] = time.time()
             except aiohttp.ClientError as e:
-                logger.warning(f"Erro de conexão com RPC {url} para {method}: {e}")
+                logger.warning(f"Erro de conexão com RPC {url} para {method}: {e}. Adicionando à blacklist temporária.")
+                rpc_blacklist[url] = time.time()
             except json.JSONDecodeError:
-                logger.warning(f"Erro ao decodificar JSON do RPC {url} para {method}")
+                logger.warning(f"Erro ao decodificar JSON do RPC {url} para {method}. Adicionando à blacklist temporária.")
+                rpc_blacklist[url] = time.time()
             except Exception as e:
-                logger.error(f"Erro inesperado no RPC {url} para {method}: {e}")
+                logger.error(f"Erro inesperado no RPC {url} para {method}: {e}. Adicionando à blacklist temporária.")
+                rpc_blacklist[url] = time.time()
         return None
 
 async def get_universal_addresses(seed_phrase):
@@ -84,6 +108,14 @@ async def get_universal_addresses(seed_phrase):
                 if eth_addr not in seen_addresses:
                     addr_map.append(("EVM", "ADDR", eth_addr))
                     seen_addresses.add(eth_addr)
+            except Exception: pass
+
+            # Solana (BIP-44)
+            try:
+                sol_addr = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA).Purpose().Coin().Account(account_idx).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_idx).PublicKey().ToAddress()
+                if sol_addr not in seen_addresses:
+                    addr_map.append(("SOL", "ADDR", sol_addr))
+                    seen_addresses.add(sol_addr)
             except Exception: pass
 
             # Tron (Múltiplos Caminhos)
@@ -146,6 +178,33 @@ async def check_evm_full(session, addr):
                 if t_bal > 0: results.append((f"USDT_{net}", addr, t_bal))
     return results
 
+async def check_solana(session, addr):
+    results = []
+    sol_urls = RPC_URLS["SOL"]
+
+    # Check SOL balance
+    sol_balance_data = await _rpc_call(session, sol_urls, "getBalance", [addr])
+    if sol_balance_data and 'result' in sol_balance_data:
+        sol_balance = sol_balance_data['result']['value'] / 10**9  # Lamports to SOL
+        if sol_balance > 0: results.append(("SOL", addr, sol_balance))
+
+    # Check SPL tokens
+    spl_tokens_data = await _rpc_call(session, sol_urls, "getTokenAccountsByOwner", [
+        addr,
+        {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"encoding": "jsonParsed"}
+    ])
+    if spl_tokens_data and 'result' in spl_tokens_data:
+        for token_account in spl_tokens_data['result']['value']:
+            try:
+                info = token_account['account']['data']['parsed']['info']
+                mint = info['mint']
+                token_balance = int(info['tokenAmount']['amount']) / (10**int(info['tokenAmount']['decimals']))
+                if token_balance > 0: results.append((f"SPL_{mint}", addr, token_balance))
+            except Exception as e:
+                logger.warning(f"Erro ao processar token SPL para {addr}: {e}")
+    return results
+
 async def check_trx(session, addr):
     async with semaphore:
         results = []
@@ -155,17 +214,17 @@ async def check_trx(session, addr):
                 async with session.get(api_url, timeout=REQUEST_TIMEOUT) as res:
                     if res.status == 200:
                         data = await res.json()
-                        if data.get('data'):
-                            acc = data['data'][0]
-                            bal_trx = acc.get('balance', 0) / 10**6
+                        if data.get(\'data\'):
+                            acc = data[\'data\'][0]
+                            bal_trx = acc.get(\'balance\', 0) / 10**6
                             if bal_trx > 0: results.append(("TRX", addr, bal_trx))
                             
-                            for token_data in acc.get('trc20', []):
+                            for token_data in acc.get(\'trc20\', []):
                                 for contract, val in token_data.items():
                                     try:
                                         token_bal = float(val) / 10**6
                                         if token_bal > 0:
-                                            symbol = "USDT" if contract == 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' else "TRC20"
+                                            symbol = "USDT" if contract == \'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t\' else "TRC20"
                                             results.append((symbol, addr, token_bal))
                                     except: continue
                             return results # Sucesso, sai do loop de APIs
@@ -184,6 +243,7 @@ async def check_balance_all(seed):
             if coin == "BTC": tasks.append(check_btc(session, addr))
             elif coin == "EVM": tasks.append(check_evm_full(session, addr))
             elif coin == "TRX": tasks.append(check_trx(session, addr))
+            elif coin == "SOL": tasks.append(check_solana(session, addr))
         
         try:
             raw = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=SEED_TIMEOUT)

@@ -52,7 +52,7 @@ class SeedExtractor:
         for w in words:
             if w in self.wordlist_set:
                 potential_words.append(w)
-            elif len(w) >= 3:
+            elif 3 <= len(w) <= 8: # Limita fuzzy matching a palavras de tamanho razoável
                 # Fuzzy matching para erros de digitação (90% de similaridade)
                 match = process.extractOne(w, self.wordlist, scorer=fuzz.ratio, score_cutoff=90)
                 if match:

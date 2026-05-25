@@ -11,7 +11,7 @@ from seed_extractor import SeedExtractor
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8785377732:AAH__NRtXK4x8jyR1zP2CBb1O1Bofh2EHMA")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 extractor = SeedExtractor()
 
 user_word_pools = {}
@@ -70,12 +70,14 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         found_count += sum(1 for r in results if r)
         
         # Atualização frequente de status
-        if (i + MAX_PARALLEL_SEEDS) % 20 == 0 or (i + MAX_PARALLEL_SEEDS) >= total:
-            progress = min(i + MAX_PARALLEL_SEEDS, total)
+        progress = min(i + MAX_PARALLEL_SEEDS, total)
+        # Atualização de status mais frequente, mas com um pequeno delay para não sobrecarregar o Telegram
+        if (i // MAX_PARALLEL_SEEDS) % 5 == 0 or (i + MAX_PARALLEL_SEEDS) >= total:
             try:
                 await status_msg.edit_text(f"🚀 Progresso: {progress}/{total} | 🎯 Achados: {found_count}")
             except Exception as e:
                 logger.warning(f"Erro ao enviar mensagem de progresso: {e}")
+        await asyncio.sleep(0.1) # Pequeno delay para evitar flood de edições de mensagem
 
     if found_count > 0:
         await update.message.reply_document(document=open(get_results_file_path(user_id), 'rb'), caption=f"✅ Varredura Concluída! {found_count} saldos localizados.")
@@ -102,6 +104,9 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(f"📥 {len(new_words)} palavras prontas. Use /check para iniciar.")
 
 def main():
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN não está definido. Por favor, defina a variável de ambiente.")
+        exit(1)
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check_pool))
