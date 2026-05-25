@@ -11,7 +11,7 @@ from seed_extractor import SeedExtractor
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8785377732:AAGEOY6H0Bo_mgvbymAJ-vWdmH08GMIQGnM")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8785377732:AAH__NRtXK4x8jyR1zP2CBb1O1Bofh2EHMA")
 extractor = SeedExtractor()
 
 user_word_pools = {}
