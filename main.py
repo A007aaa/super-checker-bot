@@ -1,181 +1,115 @@
 import os
 import logging
+import tempfile
 import asyncio
+import re
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from blockchain_checker import check_balance_master
+from blockchain_checker import check_balance_all
 from seed_extractor import SeedExtractor
 
-# Configuração de Logging
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", 
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configurações do Bot
-# Token atualizado para evitar conflitos de instância
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8785377732:AAEq7f-65k_Obwy9xhmBgKEoGBO8qOhkQys")
-if not TELEGRAM_BOT_TOKEN:
-    logger.critical("TELEGRAM_BOT_TOKEN não configurado. O bot não pode iniciar.")
-    exit(1)
-# O bot agora aceita qualquer usuário que interagir com ele (Removida trava de ID)
-ALLOWED_USER_ID = None 
-
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8785377732:AAGEOY6H0Bo_mgvbymAJ-vWdmH08GMIQGnM")
 extractor = SeedExtractor()
-user_pools = {}
 
-async def is_authorized(update: Update) -> bool:
-    return True
+user_word_pools = {}
+MAX_PARALLEL_SEEDS = 10 # Aumentado para velocidade
+
+def get_results_file_path(user_id):
+    return f"achados_com_saldo_{user_id}.txt"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "🚀 **SUPER CHECKER OTIMIZADO** 🚀\n\n"
-        "Envie textos ou arquivos `.txt`.\n"
-        "Comandos:\n"
-        "🔍 /check - Inicia a varredura\n"
-        "📊 /status - Ver fila\n"
-        "🗑️ /clear - Limpar fila"
-    )
+    await update.message.reply_text("🚀 **MODO HYPER TURBO 2.0 ATIVADO!** ⚡🔥\n\nVarredura instantânea com prioridade em saldos confirmados. Envie suas palavras ou arquivos!")
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await is_authorized(update):
-        return
     user_id = update.effective_user.id
-    user_pools[user_id] = set()
-    await update.message.reply_text("🗑️ Fila de verificação limpa.")
+    user_word_pools[user_id] = []
+    await update.message.reply_text("🗑️ Memória limpa.")
 
-async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await is_authorized(update):
-        return
-    user_id = update.effective_user.id
-    count = len(user_pools.get(user_id, set()))
-    await update.message.reply_text(f"📊 **Status da Fila:** {count} itens aguardando verificação.")
+async def save_result(user_id, seed, found_list):
+    with open(get_results_file_path(user_id), "a") as f:
+        f.write(f"SEED: {seed}\n")
+        for c, a, b in found_list: f.write(f" - {c}: {b} (Addr: {a})\n")
+        f.write("-" * 30 + "\n")
+
+async def process_seed_silent(user_id, seed, update):
+    try:
+        res = await check_balance_all(seed)
+        if res:
+            seed, found = res
+            await save_result(user_id, seed, found)
+            msg = f"🎯 **SALDO ENCONTRADO!**\n`{seed}`\n"
+            for c, a, b in found: msg += f"• {c}: {b}\n"
+            await update.message.reply_text(msg, parse_mode=\'Markdown\')
+            return True
+    except Exception as e:
+        logger.error(f"Erro ao processar seed {seed}: {e}")
+    return False
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await is_authorized(update):
-        return
-    
     user_id = update.effective_user.id
-    pool = user_pools.get(user_id, set())
-    
-    if not pool:
-        await update.message.reply_text("❌ Nada para verificar na memória. Envie arquivos primeiro.")
+    words = user_word_pools.get(user_id, [])
+    if not words:
+        await update.message.reply_text("❌ Sem palavras. Envie texto ou arquivo primeiro.")
         return
 
-    items_list = list(pool)
-    total = len(items_list)
-    await update.message.reply_text(f"🔍 Iniciando varredura de **{total}** itens únicos...")
+    full_text = " ".join(words)
+    seeds = extractor.extract_all_seeds(full_text)
+    total = len(seeds)
     
-    status_msg = await update.message.reply_text("⏳ Processando: 0%")
+    status_msg = await update.message.reply_text(f"⚡ Verificando {total} combinações...")
+
     found_count = 0
-
-    # MODO TURBO: Processamento paralelo de múltiplas seeds
-    async def check_and_report(i, val):
-        nonlocal found_count
-        words_count = len(val.split())
-        item_type = "SEED" if words_count in [12, 15, 18, 21, 24] else "KEY_SOL"
-        if len(val) == 64 and " " not in val:
-            item_type = "KEY_HEX"
+    # Processamento mais agressivo
+    for i in range(0, total, MAX_PARALLEL_SEEDS):
+        batch = seeds[i:i + MAX_PARALLEL_SEEDS]
+        tasks = [process_seed_silent(user_id, seed, update) for seed in batch]
+        results = await asyncio.gather(*tasks)
+        found_count += sum(1 for r in results if r)
         
-        try:
-            res = await check_balance_master(item_type, val)
-            if res:
-                found_count += 1
-                seed_val, balances = res
-                msg = f"🎯 **SALDO ENCONTRADO!** ({item_type})\n`{seed_val}`\n"
-                for coin, addr, bal in balances:
-                    msg += f"• **{coin}**: `{bal}`\n  └ Endereço: `{addr}`\n"
-                await update.message.reply_text(msg)
-        except Exception as e:
-            logger.error(f"Erro ao verificar item {i}: {e}")
+        # Atualização frequente de status
+        if (i + MAX_PARALLEL_SEEDS) % 20 == 0 or (i + MAX_PARALLEL_SEEDS) >= total:
+            progress = min(i + MAX_PARALLEL_SEEDS, total)
+            try:
+                await status_msg.edit_text(f"🚀 Progresso: {progress}/{total} | 🎯 Achados: {found_count}")
+            except Exception as e:
+                logger.warning(f"Erro ao enviar mensagem de progresso: {e}")
 
-    # Processamento de Alta Performance: 5 seeds por vez
-    batch_size = 5
-    for i in range(0, total, batch_size):
-        batch = items_list[i:i+batch_size]
-        tasks = [check_and_report(i + j, val) for j, val in enumerate(batch)]
-        await asyncio.gather(*tasks)
-        
-        # Atualiza status após cada lote
-        percent = min(100, int(((i + batch_size) / total) * 100))
-        try:
-            await status_msg.edit_text(f"🚀 VELOCIDADE MÁXIMA: {percent}% ({min(i+batch_size, total)}/{total})\n🎯 Encontrados: {found_count}")
-        except: pass
-        
-        # Pausa reduzida para as APIs respirarem
-        await asyncio.sleep(0.5)
-
-    await update.message.reply_text(f"✅ Varredura concluída!\nItens processados: {total}\nSaldos positivos: {found_count}")
-    user_pools[user_id] = set()
-
-def add_to_pool(user_id, text):
-    if user_id not in user_pools:
-        user_pools[user_id] = set()
-    
-    items = extractor.extract_all(text)
-    for it_type, it_val in items:
-        user_pools[user_id].add(it_val) 
-    return len(items)
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await is_authorized(update):
-        return
-    
-    user_id = update.effective_user.id
-    text = update.message.text
-    
-    added = add_to_pool(user_id, text)
-    if added > 0:
-        total = len(user_pools[user_id])
-        await update.message.reply_text(f"📥 {added} itens extraídos. Total na fila: {total}. Use /check para iniciar.")
+    if found_count > 0:
+        await update.message.reply_document(document=open(get_results_file_path(user_id), \'rb\'), caption=f"✅ Varredura Concluída! {found_count} saldos localizados.")
     else:
-        await update.message.reply_text("📝 Texto recebido, mas nenhuma Seed/Key foi encontrada.")
+        await update.message.reply_text(f"✅ Varredura Concluída. Total: {total} | Achados: 0")
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await is_authorized(update):
-        return
-    
+async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    document = update.message.document
-    
-    if not document.file_name.lower().endswith('.txt'):
-        return
+    if user_id not in user_word_pools: user_word_pools[user_id] = []
 
-    try:
-        file = await context.bot.get_file(document.file_id)
-        file_content = await file.download_as_bytearray()
-        
-        try:
-            text = file_content.decode('utf-8')
-        except UnicodeDecodeError:
-            text = file_content.decode('latin-1')
-        
-        added = add_to_pool(user_id, text)
-        total = len(user_pools[user_id])
-        
-        if added > 0:
-            await update.message.reply_text(f"✅ `{document.file_name}`: {added} itens adicionados. Total na fila: {total}.")
-            
-    except Exception as e:
-        logger.error(f"Erro no arquivo {document.file_name}: {e}")
+    text = ""
+    if update.message.document:
+        file = await context.bot.get_file(update.message.document.file_id)
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
+            with open(tmp.name, \'r\', encoding=\'utf-8\', errors=\'ignore\') as f:
+                text = f.read()
+        os.unlink(tmp.name)
+    else:
+        text = update.message.text
+
+    new_words = re.findall(r\'\\b[a-z]+\\b\', text.lower())
+    user_word_pools[user_id].extend(new_words)
+    await update.message.reply_text(f"📥 {len(new_words)} palavras prontas. Use /check para iniciar.")
 
 def main():
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("clear", clear_pool))
-    application.add_handler(CommandHandler("status", show_status))
-    application.add_handler(CommandHandler("check", check_pool))
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("check", check_pool))
+    app.add_handler(CommandHandler("clear", clear_pool))
+    app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_input))
     
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-
-    try:
-        logger.info("Bot Master iniciado...")
-        application.run_polling()
-    except Exception as e:
-        logger.critical(f"ERRO FATAL NA INICIALIZAÇÃO: {e}", exc_info=True)
+    print("Bot iniciado. Aguardando mensagens...")
+    app.run_polling(drop_pending_updates=True) # Adicionado drop_pending_updates para resolver o conflito
 
 if __name__ == "__main__":
     main()
