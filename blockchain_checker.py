@@ -8,22 +8,25 @@ from bip_utils import (
 )
 
 logger = logging.getLogger(__name__)
-semaphore = asyncio.Semaphore(20)
+# Semáforo para controle de concorrência
+semaphore = asyncio.Semaphore(50)
 
+# Lista de RPCs com a sua chave da Alchemy e alternativas
 ETH_RPC_URLS = [
+    "https://eth-mainnet.g.alchemy.com/v2/o9ITDgWvucfpVAJDLJ_Lb",
     "https://cloudflare-eth.com/",
     "https://eth.llamarpc.com",
-    "https://rpc.ankr.com/eth",
-    "https://ethereum.publicnode.com",
-    "https://1rpc.io/eth"
+    "https://rpc.ankr.com/eth"
 ]
+
+# Adicionando suporte a BSC e Polygon para encontrar saldos em outras redes EVM
+BSC_RPC_URLS = ["https://binance.llamarpc.com", "https://bsc-dataseed.binance.org/"]
+POLYGON_RPC_URLS = ["https://polygon.llamarpc.com", "https://polygon-rpc.com"]
 
 SOL_RPC_URLS = [
     "https://api.mainnet-beta.solana.com",
     "https://solana-mainnet.rpc.extrnode.com",
-    "https://rpc.ankr.com/solana",
-    "https://api.metaplex.solana.com",
-    "https://solana.publicnode.com"
+    "https://rpc.ankr.com/solana"
 ]
 
 async def fetch_post(session, urls, payload, retries=5):
@@ -31,121 +34,102 @@ async def fetch_post(session, urls, payload, retries=5):
     for attempt in range(retries):
         url = urls[attempt % len(urls)]
         try:
-            async with session.post(url, json=payload, timeout=15) as res:
+            async with session.post(url, json=payload, timeout=10) as res:
                 if res.status == 200:
                     data = await res.json()
-                    if data and ('result' in data or 'error' not in data):
+                    if data and 'result' in data:
                         return data
                 elif res.status == 429:
-                    await asyncio.sleep(2 * (attempt + 1))
-                    continue
+                    await asyncio.sleep(1.5 * (attempt + 1))
         except:
-            await asyncio.sleep(1)
-            continue
+            await asyncio.sleep(0.5)
     return None
+
+async def check_evm_assets(session, addr, rpc_urls, network_name):
+    async with semaphore:
+        results = []
+        # Native Balance (ETH/BNB/MATIC)
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [addr, "latest"]}
+        data = await fetch_post(session, rpc_urls, payload)
+        if data and 'result' in data:
+            try:
+                bal = int(data['result'], 16) / 10**18
+                if bal > 0.000001: # Ignora saldos irrelevantes de poeira
+                    results.append((network_name, addr, bal))
+            except: pass
+
+        # USDT/USDC em redes EVM
+        tokens = {
+            f"USDT_{network_name}": "0xdac17f958d2ee523a2206206994597c13d831ec7" if network_name == "ETH" else "0x55d398326f99059ff775485246999027b3197955",
+            f"USDC_{network_name}": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" if network_name == "ETH" else "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"
+        }
+        for name, contract in tokens.items():
+            data_call = "0x70a08231" + addr[2:].lower().zfill(64)
+            payload_u = {"jsonrpc": "2.0", "id": 1, "method": "eth_call", "params": [{"to": contract, "data": data_call}, "latest"]}
+            data_u = await fetch_post(session, rpc_urls, payload_u)
+            if data_u and 'result' in data_u and data_u['result'] != '0x':
+                try:
+                    u_bal = int(data_u['result'], 16) / 10**6 # USDT/USDC geralmente 6 casas
+                    if u_bal > 0.1:
+                        results.append((name, addr, u_bal))
+                except: pass
+        return results
 
 async def check_sol_assets(session, addr):
     async with semaphore:
         results = []
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [addr]}
         data = await fetch_post(session, SOL_RPC_URLS, payload)
-        if data and 'result' in data and data['result'] is not None:
-            val = data['result'].get('value', 0)
-            if val and val > 0:
-                results.append(("SOL", addr, val / 10**9))
-
-        payload_tokens = {
-            "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
-            "params": [addr, {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}, {"encoding": "jsonParsed"}]
-        }
-        data_tokens = await fetch_post(session, SOL_RPC_URLS, payload_tokens)
-        if data_tokens and 'result' in data_tokens and 'value' in data_tokens['result']:
-            for account in data_tokens['result']['value']:
-                try:
-                    info = account['account']['data']['parsed']['info']
-                    mint = info['mint']
-                    amount = float(info['tokenAmount']['uiAmount'])
-                    if amount > 0:
-                        if mint == "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8En2XPyH":
-                            results.append(("USDT_SOL", addr, amount))
-                        elif mint == "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v":
-                            results.append(("USDC_SOL", addr, amount))
-                except: continue
-        return results
-
-async def check_eth_assets(session, addr):
-    async with semaphore:
-        results = []
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [addr, "latest"]}
-        data = await fetch_post(session, ETH_RPC_URLS, payload)
         if data and 'result' in data:
-            try:
-                bal = int(data['result'], 16) / 10**18
-                if bal > 0:
-                    results.append(("ETH", addr, bal))
-            except: pass
+            val = data['result'].get('value', 0) / 10**9
+            if val > 0: results.append(("SOL", addr, val))
 
-        tokens = {
-            "USDT_ETH": ("0xdac17f958d2ee523a2206206994597c13d831ec7", 6),
-            "USDC_ETH": ("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", 6)
-        }
-        for name, (contract, decimals) in tokens.items():
-            data_call = "0x70a08231" + addr[2:].lower().zfill(64)
-            payload_u = {"jsonrpc": "2.0", "id": 1, "method": "eth_call", "params": [{"to": contract, "data": data_call}, "latest"]}
-            data_u = await fetch_post(session, ETH_RPC_URLS, payload_u)
-            if data_u and 'result' in data_u and data_u['result'] != '0x':
+        # Tokens Solana
+        payload_t = {"jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner", "params": [addr, {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}, {"encoding": "jsonParsed"}]}
+        data_t = await fetch_post(session, SOL_RPC_URLS, payload_t)
+        if data_t and 'result' in data_t and 'value' in data_t['result']:
+            for acc in data_t['result']['value']:
                 try:
-                    u_bal = int(data_u['result'], 16) / 10**decimals
-                    if u_bal > 0:
-                        results.append((name, addr, u_bal))
+                    info = acc['account']['data']['parsed']['info']
+                    amt = float(info['tokenAmount']['uiAmount'])
+                    if amt > 0.1:
+                        results.append((f"TOKEN_SOL_{info['mint'][:4]}", addr, amt))
                 except: continue
         return results
 
 async def check_btc(session, addr):
     async with semaphore:
-        # Tenta múltiplas APIs para BTC
-        apis = [
-            f"https://api.blockcypher.com/v1/btc/main/addrs/{addr}/balance",
-            f"https://blockchain.info/q/addressbalance/{addr}",
-            f"https://blockstream.info/api/address/{addr}"
-        ]
-        for url in apis:
-            try:
-                async with session.get(url, timeout=10) as res:
-                    if res.status == 200:
-                        if "blockcypher" in url:
-                            data = await res.json()
-                            bal = data.get('balance', 0) / 10**8
-                        elif "blockstream" in url:
-                            data = await res.json()
-                            bal = (data['chain_stats']['funded_txo_sum'] - data['chain_stats']['spent_txo_sum']) / 10**8
-                        else:
-                            bal = int(await res.text()) / 10**8
-                        if bal > 0: return [("BTC", addr, bal)]
-                        return []
-            except: continue
+        # Tenta Blockstream (mais confiável para bc1) e Blockchain.info
+        try:
+            async with session.get(f"https://blockstream.info/api/address/{addr}", timeout=10) as res:
+                if res.status == 200:
+                    d = await res.json()
+                    bal = (d['chain_stats']['funded_txo_sum'] - d['chain_stats']['spent_txo_sum']) / 10**8
+                    if bal > 0: return [("BTC", addr, bal)]
+        except: pass
+        try:
+            async with session.get(f"https://blockchain.info/q/addressbalance/{addr}", timeout=10) as res:
+                if res.status == 200:
+                    bal = int(await res.text()) / 10**8
+                    if bal > 0: return [("BTC", addr, bal)]
+        except: pass
         return []
 
 async def check_tron_assets(session, addr):
     async with semaphore:
         results = []
         try:
-            async with session.get(f"https://api.trongrid.io/v1/accounts/{addr}", timeout=15) as res:
+            async with session.get(f"https://api.trongrid.io/v1/accounts/{addr}", timeout=10) as res:
                 if res.status == 200:
-                    data = await res.json()
-                    if data.get('success') and data.get('data'):
-                        acc = data['data'][0]
-                        trx_bal = acc.get('balance', 0) / 10**6
-                        if trx_bal > 0: results.append(("TRX", addr, trx_bal))
-                        trc20_list = acc.get('trc20', [])
-                        for token in trc20_list:
+                    d = await res.json()
+                    if d.get('success') and d.get('data'):
+                        acc = d['data'][0]
+                        bal = acc.get('balance', 0) / 10**6
+                        if bal > 0: results.append(("TRX", addr, bal))
+                        for token in acc.get('trc20', []):
                             for contract, balance in token.items():
-                                if contract == "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t": # USDT
-                                    u_bal = int(balance) / 10**6
-                                    if u_bal > 0: results.append(("USDT_TRC20", addr, u_bal))
-                                elif contract == "TEkxiTeY4Bf3Y89S4V2pEwKX8N8m1ogq5B": # USDC
-                                    u_bal = int(balance) / 10**6
-                                    if u_bal > 0: results.append(("USDC_TRC20", addr, u_bal))
+                                amt = int(balance) / 10**6
+                                if amt > 0.1: results.append(("USDT_TRC20", addr, amt))
         except: pass
     return results
 
@@ -155,55 +139,45 @@ async def check_balance_master(type, value):
         if type == "SEED":
             try:
                 seed_bytes = Bip39SeedGenerator(value).Generate()
-                # Verificando 20 endereços com cobertura total de padrões
-                for i in range(20):
-                    # BTC Native Segwit (bc1...)
-                    addr_84 = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
-                    tasks.append(check_btc(session, addr_84))
+                # Verificação profunda: 15 endereços por padrão (Equilíbrio entre velocidade e cobertura)
+                for i in range(15):
+                    # BTC: Native Segwit, Segwit, Legacy
+                    tasks.append(check_btc(session, Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
+                    tasks.append(check_btc(session, Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
+                    tasks.append(check_btc(session, Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
                     
-                    # BTC Segwit (3...) - BIP49
-                    addr_49 = Bip49.FromSeed(seed_bytes, Bip49Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
-                    tasks.append(check_btc(session, addr_49))
-
-                    # BTC Legacy (1...) - BIP44
-                    addr_44 = Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
-                    tasks.append(check_btc(session, addr_44))
+                    # EVM: ETH, BSC, Polygon
+                    addr_evm = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
+                    tasks.append(check_evm_assets(session, addr_evm, ETH_RPC_URLS, "ETH"))
+                    tasks.append(check_evm_assets(session, addr_evm, BSC_RPC_URLS, "BSC"))
+                    tasks.append(check_evm_assets(session, addr_evm, POLYGON_RPC_URLS, "POLYGON"))
                     
-                    # ETH
-                    addr_eth = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
-                    tasks.append(check_eth_assets(session, addr_eth))
-                    
-                    # SOL (Caminhos variados)
+                    # SOL: Standard e Trust Wallet path
                     bip44_sol = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA)
                     tasks.append(check_sol_assets(session, bip44_sol.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
-                    try:
-                        tasks.append(check_sol_assets(session, bip44_sol.Purpose().Coin().Account(i).PublicKey().ToAddress()))
+                    try: tasks.append(check_sol_assets(session, bip44_sol.Purpose().Coin().Account(i).PublicKey().ToAddress()))
                     except: pass
 
                     # TRON
-                    addr_trx = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()
-                    tasks.append(check_tron_assets(session, addr_trx))
-                
+                    tasks.append(check_tron_assets(session, Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i).PublicKey().ToAddress()))
             except Exception as e:
-                logger.error(f"Erro ao derivar seed: {e}")
+                logger.error(f"Erro na derivação: {e}")
                 return None
         else:
-            addr = value
-            if addr.startswith('0x'): tasks.append(check_eth_assets(session, addr))
-            elif addr.startswith('T'): tasks.append(check_tron_assets(session, addr))
-            elif addr.startswith('1') or addr.startswith('3') or addr.startswith('bc1'): tasks.append(check_btc(session, addr))
-            else: tasks.append(check_sol_assets(session, addr))
+            # Lógica para Chave Privada Direta
+            addr = value # (Simplificado para o master processar)
+            tasks.append(check_evm_assets(session, addr, ETH_RPC_URLS, "ETH"))
+            tasks.append(check_sol_assets(session, addr))
 
         batch_results = await asyncio.gather(*tasks)
         all_results = [item for sublist in batch_results for item in sublist if sublist]
             
         if all_results:
-            unique_found = []
+            unique = []
             seen = set()
             for r in all_results:
-                key = f"{r[0]}:{r[1]}"
-                if key not in seen:
-                    unique_found.append(r)
-                    seen.add(key)
-            return (value, unique_found)
+                if f"{r[0]}:{r[1]}" not in seen:
+                    unique.append(r)
+                    seen.add(f"{r[0]}:{r[1]}")
+            return (value, unique)
     return None
