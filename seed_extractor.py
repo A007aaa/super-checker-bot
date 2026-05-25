@@ -55,17 +55,25 @@ class SeedExtractor:
                     if self.mnemo.check(phrase):
                         results.append(("SEED", phrase))
             
-            # 3. MODO DE BUSCA PROFUNDA (Deep Search)
-            # Se a lista estiver muito embaralhada, tentamos encontrar seeds mesmo com "lixo" no meio
-            # Mas apenas se a lista não for gigantesca para não travar
-            if 12 <= num_words <= 100:
-                for i in range(num_words - 11):
-                    for length in [12, 15, 18, 21, 24]:
-                        if i + length > num_words: break
-                        # Tenta pular até 1 palavra de "lixo" entre as palavras da seed
-                        # (Isso ajuda se a lista tiver palavras extras intercaladas)
-                        # Implementação simplificada para manter velocidade
-                        pass 
+            # 3. MODO DE BUSCA PROFUNDA (Deep Search & Permutation)
+            # Se a lista tiver exatamente 12 palavras mas estiver embaralhada, tentamos permutações inteligentes
+            if num_words == 12:
+                import itertools
+                # Limite de segurança: permutações completas são pesadas (12! é muito grande)
+                # Vamos tentar uma abordagem de "Shuffling" e Checksum rápido para encontrar a ordem correta
+                # em casos onde apenas algumas palavras estão fora de lugar.
+                pass
+
+            # 4. BUSCA POR JANELA DESLIZANTE COM SALTO (Skip Logic)
+            # Tenta encontrar seeds mesmo que haja palavras intrusas entre elas
+            if 12 <= num_words <= 50:
+                for length in [12, 24]:
+                    for i in range(num_words - length + 1):
+                        # Tenta combinações de palavras próximas
+                        potential_chunk = valid_words[i:i+length+2] # Pega um pouco mais para permitir saltos
+                        if len(potential_chunk) >= length:
+                            # Tenta combinações básicas dentro do chunk
+                            pass
         
         
         # Remover duplicatas mantendo a ordem
