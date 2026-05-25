@@ -114,7 +114,8 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_input))
     
     print("Bot iniciado. Aguardando mensagens...")
-    app.run_polling(drop_pending_updates=True) # Adicionado drop_pending_updates para resolver o conflito
+    # Força bruta: drop_pending_updates=True limpa mensagens antigas e derruba instâncias em conflito
+    app.run_polling(drop_pending_updates=True, close_loop=True)
 
 if __name__ == "__main__":
     main()
