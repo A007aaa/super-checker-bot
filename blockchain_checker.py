@@ -21,10 +21,29 @@ MAX_ACCOUNTS = 1                # Focar na conta principal para evitar 429
 HEADERS = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
 
 RPC_URLS = {
-    "BSC": ["https://bnb-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8", "https://bsc-dataseed.binance.org/"],
-    "POLYGON": ["https://polygon-rpc.com/", "https://rpc-mainnet.maticvigil.com/"],
-    "ETH": ["https://eth-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8", "https://cloudflare-eth.com/"],
-    "SOL": ["https://solana-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8", "https://api.mainnet-beta.solana.com"],
+    "BSC": [
+        "https://bnb-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8",
+        "https://bsc-dataseed.binance.org/",
+        "https://bsc-dataseed1.defibit.io/",
+        "https://rpc.ankr.com/bsc"
+    ],
+    "POLYGON": [
+        "https://polygon-rpc.com/",
+        "https://rpc-mainnet.maticvigil.com/",
+        "https://rpc.ankr.com/polygon"
+    ],
+    "ETH": [
+        "https://eth-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8",
+        "https://cloudflare-eth.com/",
+        "https://eth-mainnet.public.blastapi.io/",
+        "https://rpc.ankr.com/eth"
+    ],
+    "SOL": [
+        "https://solana-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8",
+        "https://api.mainnet-beta.solana.com",
+        "https://solana-mainnet.phantom.app/",
+        "https://rpc.ankr.com/solana"
+    ],
     "SOL_DEVNET": ["https://api.devnet.solana.com"]
 }
 
@@ -55,21 +74,29 @@ async def _rpc_call(session, urls, method, params):
 
         random.shuffle(available_urls)
 
-        for url in available_urls:
+        # Prioridade: Tenta primeiro as URLs que NÃO estão na blacklist
+        # Se todas estiverem na blacklist, tentamos a primeira disponível mesmo assim (fallback de emergência)
+        urls_to_try = available_urls if available_urls else urls
+        
+        for url in urls_to_try:
             try:
                 async with session.post(url, json=payload, timeout=REQUEST_TIMEOUT) as res:
                     if res.status == 200:
                         data = await res.json()
                         if 'result' in data: 
-                            if url in rpc_blacklist: del rpc_blacklist[url] # Remove da blacklist se funcionar
+                            if url in rpc_blacklist: del rpc_blacklist[url] 
                             return data
                     elif res.status == 429:
-                        logger.warning(f"RPC {url} retornou status 429 (Too Many Requests) para {method}. Adicionando à blacklist temporária.")
+                        logger.warning(f"RPC {url} com limite excedido (429).")
                         rpc_blacklist[url] = time.time()
-                        await asyncio.sleep(random.uniform(5, 10)) # Espera mais tempo se der 429
+                        # Não espera aqui, tenta a próxima URL da lista imediatamente
+                        continue 
                     else:
-                        logger.warning(f"RPC {url} retornou status {res.status} para {method}. Adicionando à blacklist temporária.")
+                        logger.warning(f"RPC {url} erro {res.status}.")
                         rpc_blacklist[url] = time.time()
+            except Exception as e:
+                logger.warning(f"Erro na conexão com {url}: {e}")
+                rpc_blacklist[url] = time.time()
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout ao conectar com RPC {url} para {method}. Adicionando à blacklist temporária.")
                 rpc_blacklist[url] = time.time()
