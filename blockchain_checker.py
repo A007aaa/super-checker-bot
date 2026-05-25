@@ -214,17 +214,17 @@ async def check_trx(session, addr):
                 async with session.get(api_url, timeout=REQUEST_TIMEOUT) as res:
                     if res.status == 200:
                         data = await res.json()
-                        if data.get(\'data\'):
-                            acc = data[\'data\'][0]
-                            bal_trx = acc.get(\'balance\', 0) / 10**6
+                        if data.get('data'):
+                            acc = data['data'][0]
+                            bal_trx = acc.get('balance', 0) / 10**6
                             if bal_trx > 0: results.append(("TRX", addr, bal_trx))
                             
-                            for token_data in acc.get(\'trc20\', []):
+                            for token_data in acc.get('trc20', []):
                                 for contract, val in token_data.items():
                                     try:
                                         token_bal = float(val) / 10**6
                                         if token_bal > 0:
-                                            symbol = "USDT" if contract == \'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t\' else "TRC20"
+                                            symbol = "USDT" if contract == 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' else "TRC20"
                                             results.append((symbol, addr, token_bal))
                                     except: continue
                             return results # Sucesso, sai do loop de APIs
