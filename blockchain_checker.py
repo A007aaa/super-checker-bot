@@ -39,7 +39,7 @@ semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 # Blacklist temporária para RPCs com falha
 rpc_blacklist = {}
-BLACKLIST_TIME = 300 # 5 minutos
+BLACKLIST_TIME = 60 # Reduzido para 1 minuto para ser menos punitivo
 
 async def _rpc_call(session, urls, method, params):
     async with semaphore:
@@ -49,7 +49,7 @@ async def _rpc_call(session, urls, method, params):
         available_urls = [url for url in urls if url not in rpc_blacklist or (time.time() - rpc_blacklist[url]) > BLACKLIST_TIME]
         if not available_urls:
             logger.warning(f"Todas as URLs RPC para {method} estão na blacklist. Tentando novamente em breve.")
-            await asyncio.sleep(10) # Espera antes de tentar novamente se todas estiverem na blacklist
+            await asyncio.sleep(5) # Espera 5 segundos
             available_urls = [url for url in urls if url not in rpc_blacklist or (time.time() - rpc_blacklist[url]) > BLACKLIST_TIME]
             if not available_urls: return None # Se ainda não houver URLs, desiste
 
