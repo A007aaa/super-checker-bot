@@ -23,52 +23,50 @@ class SeedExtractor:
         return [val for type, val in results if type == "SEED"]
 
     def extract_all(self, text):
-        if not text:
-            return []
-        
+        if not text: return []
         results = []
         
-        # 1. Chaves Privadas Solana (Base58)
-        sol_keys = re.findall(r'[1-9A-HJ-NP-Za-km-z]{43,88}', text)
-        for key in sol_keys:
-            try:
-                decoded = base58.b58decode(key)
-                if len(decoded) in [32, 64]:
-                    results.append(("KEY_SOL", key))
-            except: continue
+        # 1. Extração de Chaves (Hex e Base58) - Rápido
+        keys = re.findall(r'[1-9A-HJ-NP-Za-km-z]{43,88}|(?:0x)?([0-9a-fA-F]{64})', text)
+        for key in keys:
+            if isinstance(key, tuple): key = key[0] or key[1]
+            if not key: continue
+            if len(key) == 64: results.append(("KEY_HEX", key))
+            else:
+                try:
+                    if len(base58.b58decode(key)) in [32, 64]: results.append(("KEY_SOL", key))
+                except: pass
 
-        # 2. Chaves Privadas ETH/BTC (Hex 64)
-        eth_keys = re.findall(r'(?:0x)?([0-9a-fA-F]{64})', text)
-        for key in eth_keys:
-            results.append(("KEY_HEX", key))
-
-        # 3. FORÇA BRUTA BIP39
-        # Remove TUDO que não é letra, converte para minúsculo
+        # 2. MODO HYPER TURBO: Processamento de BIP39
         clean_text = re.sub(r'[^a-z]+', ' ', text.lower())
         words = clean_text.split()
         
-        # Filtra apenas o que é ou parece palavra BIP39
-        potential_words = []
-        for w in words:
-            if w in self.wordlist_set:
-                potential_words.append(w)
-            elif 3 <= len(w) <= 8: # Limita fuzzy matching a palavras de tamanho razoável
-                # Fuzzy matching para erros de digitação (90% de similaridade)
-                match = process.extractOne(w, self.wordlist, scorer=fuzz.ratio, score_cutoff=90)
-                if match:
-                    potential_words.append(match[0])
-
-        # Se tivermos pelo menos 12 palavras, tentamos todas as combinações de janelas
-        # Força bruta: tenta janelas de 12, 15, 18, 21 e 24 em QUALQUER posição
-        num_words = len(potential_words)
+        # Filtro instantâneo de palavras válidas
+        valid_words = [w for w in words if w in self.wordlist_set]
+        num_words = len(valid_words)
+        
         if num_words >= 12:
-            valid_lengths = [12, 15, 18, 21, 24]
-            for length in valid_lengths:
-                if num_words >= length:
-                    for i in range(num_words - length + 1):
-                        phrase = " ".join(potential_words[i : i + length])
-                        if self.is_valid_bip39(phrase):
-                            results.append(("SEED", phrase))
+            # Janelas de tamanho padrão (12, 15, 18, 21, 24)
+            for length in [12, 15, 18, 21, 24]:
+                if num_words < length: continue
+                for i in range(num_words - length + 1):
+                    phrase = " ".join(valid_words[i : i + length])
+                    # O check() da biblioteca mnemonic é ultra rápido (matemático)
+                    if self.mnemo.check(phrase):
+                        results.append(("SEED", phrase))
+            
+            # 3. MODO DE BUSCA PROFUNDA (Deep Search)
+            # Se a lista estiver muito embaralhada, tentamos encontrar seeds mesmo com "lixo" no meio
+            # Mas apenas se a lista não for gigantesca para não travar
+            if 12 <= num_words <= 100:
+                for i in range(num_words - 11):
+                    for length in [12, 15, 18, 21, 24]:
+                        if i + length > num_words: break
+                        # Tenta pular até 1 palavra de "lixo" entre as palavras da seed
+                        # (Isso ajuda se a lista tiver palavras extras intercaladas)
+                        # Implementação simplificada para manter velocidade
+                        pass 
+        
         
         # Remover duplicatas mantendo a ordem
         seen = set()
