@@ -94,13 +94,13 @@ async def _rpc_call(session, urls, method, params):
     async with semaphore:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         
-        # Filtra URLs blacklisted e embaralha as restantes
+        # Filtra URLs blacklisted
         available_urls = [url for url in urls if url not in rpc_blacklist or (time.time() - rpc_blacklist[url]) > BLACKLIST_TIME]
+        
+        # Se todas estiverem na blacklist, tentamos as URLs originais ignorando a blacklist (modo sobrevivência)
         if not available_urls:
-            logger.warning(f"Todas as URLs RPC para {method} estão na blacklist. Tentando novamente em breve.")
-            await asyncio.sleep(5) # Espera 5 segundos
-            available_urls = [url for url in urls if url not in rpc_blacklist or (time.time() - rpc_blacklist[url]) > BLACKLIST_TIME]
-            if not available_urls: return None # Se ainda não houver URLs, desiste
+            available_urls = urls
+            random.shuffle(available_urls)
 
         random.shuffle(available_urls)
 
