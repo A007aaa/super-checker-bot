@@ -50,9 +50,9 @@ class SeedExtractor:
 
             # 4. BUSCA POR JANELA DESLIZANTE COM SALTO (Skip Logic)
             # Tenta encontrar seeds mesmo que haja palavras intrusas entre elas
-            if 12 <= num_words <= 50:
+            if 12 <= num_total <= 50:
                 for length in [12, 24]:
-                    for i in range(num_words - length + 1):
+                    for i in range(num_total - length + 1):
                         # Tenta combinações de palavras próximas
                         potential_chunk = valid_words[i:i+length+2] # Pega um pouco mais para permitir saltos
                         if len(potential_chunk) >= length:
