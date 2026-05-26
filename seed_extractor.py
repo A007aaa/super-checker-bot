@@ -26,45 +26,27 @@ class SeedExtractor:
         if not text: return []
         results = []
         
-        # 1. Extração de Chaves (Hex e Base58) - Rápido
-        keys = re.findall(r'[1-9A-HJ-NP-Za-km-z]{43,88}|(?:0x)?([0-9a-fA-F]{64})', text)
+        # 1. Extração Ultra-Rápida de Chaves
+        # Focamos nos padrões mais comuns para não perder tempo
+        keys = re.findall(r'(?:0x)?([0-9a-fA-F]{64})', text)
         for key in keys:
-            if isinstance(key, tuple): key = key[0] or key[1]
-            if not key: continue
-            if len(key) == 64: results.append(("KEY_HEX", key))
-            else:
-                try:
-                    if len(base58.b58decode(key)) in [32, 64]: results.append(("KEY_SOL", key))
-                except: pass
+            results.append(("KEY_HEX", key))
 
-        # 2. MODO HYPER TURBO: Processamento de BIP39
-        # Melhoria: Processa o texto mantendo a estrutura de blocos para não misturar seeds
-        # Dividimos o texto por quebras de linha ou múltiplos espaços para isolar possíveis seeds
-        blocks = re.split(r'\n+|,|;| {2,}', text.lower())
+        # 2. MODO WARP: Processamento de BIP39 de Alta Performance
+        # Filtramos todas as palavras válidas do texto de uma só vez para velocidade máxima
+        all_words = re.findall(r'[a-z]{3,}', text.lower())
+        valid_words = [w for w in all_words if w in self.wordlist_set]
+        num_total = len(valid_words)
         
-        # Primeiro, tentamos a busca por blocos (mais rápida e organizada)
-        for block in blocks:
-            clean_block = re.sub(r'[^a-z]+', ' ', block)
-            words = clean_block.split()
-            valid_words = [w for w in words if w in self.wordlist_set]
-            num_words = len(valid_words)
-            if num_words >= 12:
-                for length in [12, 15, 18, 21, 24]:
-                    if num_words < length: continue
-                    for i in range(num_words - length + 1):
-                        phrase = " ".join(valid_words[i : i + length])
-                        if self.mnemo.check(phrase): results.append(("SEED", phrase))
-
-        # Segundo, tentamos a busca global (para listas totalmente embaralhadas sem quebras de linha)
-        all_clean = re.sub(r'[^a-z]+', ' ', text.lower())
-        all_valid_words = [w for w in all_clean.split() if w in self.wordlist_set]
-        num_total = len(all_valid_words)
         if num_total >= 12:
-            for length in [12, 15, 18, 21, 24]:
+            # Janela deslizante ultra-rápida (apenas 12 e 24 palavras que são 99% dos casos)
+            for length in [12, 24]:
                 if num_total < length: continue
                 for i in range(num_total - length + 1):
-                    phrase = " ".join(all_valid_words[i : i + length])
-                    if self.mnemo.check(phrase): results.append(("SEED", phrase))
+                    phrase = " ".join(valid_words[i : i + length])
+                    # Checksum matemático local (instantâneo)
+                    if self.mnemo.check(phrase):
+                        results.append(("SEED", phrase))
 
             # 4. BUSCA POR JANELA DESLIZANTE COM SALTO (Skip Logic)
             # Tenta encontrar seeds mesmo que haja palavras intrusas entre elas
