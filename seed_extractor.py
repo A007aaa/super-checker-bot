@@ -55,14 +55,13 @@ class SeedExtractor:
                     if self.mnemo.check(phrase):
                         results.append(("SEED", phrase))
             
-            # 3. MODO DE BUSCA PROFUNDA (Deep Search & Permutation)
-            # Se a lista tiver exatamente 12 palavras mas estiver embaralhada, tentamos permutações inteligentes
-            if num_words == 12:
-                import itertools
-                # Limite de segurança: permutações completas são pesadas (12! é muito grande)
-                # Vamos tentar uma abordagem de "Shuffling" e Checksum rápido para encontrar a ordem correta
-                # em casos onde apenas algumas palavras estão fora de lugar.
-                pass
+            # 3. MODO DE BUSCA PROFUNDA (Deep Search & Fast Validation)
+            # Se a lista tiver 12 ou 24 palavras, ela já é uma forte candidata.
+            # Otimizamos para verificar apenas o necessário.
+            if num_words in [12, 15, 18, 21, 24]:
+                phrase = " ".join(valid_words)
+                if self.mnemo.check(phrase):
+                    results.append(("SEED", phrase))
 
             # 4. BUSCA POR JANELA DESLIZANTE COM SALTO (Skip Logic)
             # Tenta encontrar seeds mesmo que haja palavras intrusas entre elas
