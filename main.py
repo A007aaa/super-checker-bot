@@ -15,7 +15,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 extractor = SeedExtractor()
 
 user_word_pools = {}
-MAX_PARALLEL_SEEDS = 25 # Modo Hyper Turbo: Processa 25 seeds simultaneamente
+MAX_PARALLEL_SEEDS = 50 # Modo Hyper Turbo: Processa 50 seeds simultaneamente (com cache RPC)
 
 def get_results_file_path(user_id):
     return f"achados_com_saldo_{user_id}.txt"
@@ -62,12 +62,13 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     status_msg = await update.message.reply_text(f"⚡ Verificando {total} combinações...")
 
     found_count = 0
-    # Processamento mais agressivo
+    # Processamento ultra agressivo em lotes
+    # Aumentamos o lote para reduzir o overhead de agendamento de tarefas
     for i in range(0, total, MAX_PARALLEL_SEEDS):
         batch = seeds[i:i + MAX_PARALLEL_SEEDS]
-        tasks = [process_seed_silent(user_id, seed, update) for seed in batch]
-        results = await asyncio.gather(*tasks)
-        found_count += sum(1 for r in results if r)
+        # Executa o lote de verificações de forma concorrente
+        results = await asyncio.gather(*[process_seed_silent(user_id, seed, update) for seed in batch], return_exceptions=True)
+        found_count += sum(1 for r in results if isinstance(r, bool) and r)
         
         # Atualização frequente de status
         progress = min(i + MAX_PARALLEL_SEEDS, total)

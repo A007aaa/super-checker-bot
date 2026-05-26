@@ -76,9 +76,21 @@ semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 # Blacklist temporária para RPCs com falha
 rpc_blacklist = {}
-BLACKLIST_TIME = 60 # Reduzido para 1 minuto para ser menos punitivo
+BLACKLIST_TIME = 60 
+
+# Cache em memória para evitar requisições duplicadas (Expira em 1 hora)
+balance_cache = {}
+CACHE_EXPIRY = 3600
 
 async def _rpc_call(session, urls, method, params):
+    # Gerar chave de cache para métodos de leitura
+    cache_key = None
+    if method in ["eth_getBalance", "eth_call", "getBalance", "getTokenAccountsByOwner"]:
+        cache_key = f"{method}:{json.dumps(params)}:{urls[0]}"
+        if cache_key in balance_cache:
+            val, timestamp = balance_cache[cache_key]
+            if time.time() - timestamp < CACHE_EXPIRY:
+                return val
     async with semaphore:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         
@@ -102,7 +114,8 @@ async def _rpc_call(session, urls, method, params):
                     if res.status == 200:
                         data = await res.json()
                         if 'result' in data: 
-                            if url in rpc_blacklist: del rpc_blacklist[url] 
+                            if url in rpc_blacklist: del rpc_blacklist[url]
+                            if cache_key: balance_cache[cache_key] = (data, time.time())
                             return data
                     elif res.status == 429:
                         logger.warning(f"RPC {url} com limite excedido (429).")
