@@ -18,7 +18,7 @@ from bip_utils import (
 # ── ULTRA SPEED & ASSERTIVENESS TUNABLES ────────────────────────────────────
 REQUEST_TIMEOUT   = 10          # Tempo limite para cada requisição RPC
 SEED_TIMEOUT      = 120         # Tempo limite total para verificar uma seed
-MAX_CONCURRENT_REQUESTS = 100   # MODO WARP: Velocidade Extrema Absoluta
+MAX_CONCURRENT_REQUESTS = 40    # Ajustado para Equilíbrio entre Velocidade e Estabilidade (Evita 429)
 GAP_LIMIT = 5                   # Reduzido para velocidade e estabilidade
 MAX_ACCOUNTS = 1                # Focar na conta principal para evitar 429
 HEADERS = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
