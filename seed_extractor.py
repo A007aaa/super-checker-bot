@@ -38,30 +38,33 @@ class SeedExtractor:
                 except: pass
 
         # 2. MODO HYPER TURBO: Processamento de BIP39
-        clean_text = re.sub(r'[^a-z]+', ' ', text.lower())
-        words = clean_text.split()
+        # Melhoria: Processa o texto mantendo a estrutura de blocos para não misturar seeds
+        # Dividimos o texto por quebras de linha ou múltiplos espaços para isolar possíveis seeds
+        blocks = re.split(r'\n+|,|;| {2,}', text.lower())
         
-        # Filtro instantâneo de palavras válidas
-        valid_words = [w for w in words if w in self.wordlist_set]
-        num_words = len(valid_words)
-        
-        if num_words >= 12:
-            # Janelas de tamanho padrão (12, 15, 18, 21, 24)
+        # Primeiro, tentamos a busca por blocos (mais rápida e organizada)
+        for block in blocks:
+            clean_block = re.sub(r'[^a-z]+', ' ', block)
+            words = clean_block.split()
+            valid_words = [w for w in words if w in self.wordlist_set]
+            num_words = len(valid_words)
+            if num_words >= 12:
+                for length in [12, 15, 18, 21, 24]:
+                    if num_words < length: continue
+                    for i in range(num_words - length + 1):
+                        phrase = " ".join(valid_words[i : i + length])
+                        if self.mnemo.check(phrase): results.append(("SEED", phrase))
+
+        # Segundo, tentamos a busca global (para listas totalmente embaralhadas sem quebras de linha)
+        all_clean = re.sub(r'[^a-z]+', ' ', text.lower())
+        all_valid_words = [w for w in all_clean.split() if w in self.wordlist_set]
+        num_total = len(all_valid_words)
+        if num_total >= 12:
             for length in [12, 15, 18, 21, 24]:
-                if num_words < length: continue
-                for i in range(num_words - length + 1):
-                    phrase = " ".join(valid_words[i : i + length])
-                    # O check() da biblioteca mnemonic é ultra rápido (matemático)
-                    if self.mnemo.check(phrase):
-                        results.append(("SEED", phrase))
-            
-            # 3. MODO DE BUSCA PROFUNDA (Deep Search & Fast Validation)
-            # Se a lista tiver 12 ou 24 palavras, ela já é uma forte candidata.
-            # Otimizamos para verificar apenas o necessário.
-            if num_words in [12, 15, 18, 21, 24]:
-                phrase = " ".join(valid_words)
-                if self.mnemo.check(phrase):
-                    results.append(("SEED", phrase))
+                if num_total < length: continue
+                for i in range(num_total - length + 1):
+                    phrase = " ".join(all_valid_words[i : i + length])
+                    if self.mnemo.check(phrase): results.append(("SEED", phrase))
 
             # 4. BUSCA POR JANELA DESLIZANTE COM SALTO (Skip Logic)
             # Tenta encontrar seeds mesmo que haja palavras intrusas entre elas
