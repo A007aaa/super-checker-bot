@@ -119,11 +119,22 @@ def main():
     # MODO SERVERLESS FORÇADO: Webhooks são obrigatórios
     if not WEBHOOK_URL:
         logger.error("ERRO: PUBLIC_DOMAIN ou RAILWAY_STATIC_URL não configurado. Webhook é obrigatório para modo Serverless.")
-        # Tenta usar o domínio padrão se não houver variável, mas avisa
         WEBHOOK_URL = "zucchini-playfulness-production.up.railway.app"
         
     webhook_path = f"/{TELEGRAM_BOT_TOKEN}"
     full_webhook_url = f"https://{WEBHOOK_URL}{webhook_path}"
+    
+    # LIMPEZA TOTAL: Antes de iniciar, deletamos qualquer conexão antiga para evitar erro 409
+    async def cleanup():
+        bot = app.bot
+        logger.info("Limpando conexões antigas do Telegram...")
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Conexões limpas. Iniciando novo Webhook...")
+
+    # Executa a limpeza antes de rodar o webhook
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(cleanup())
     
     logger.info(f"Iniciando em modo WEBHOOK (Serverless): {full_webhook_url}")
     app.run_webhook(
