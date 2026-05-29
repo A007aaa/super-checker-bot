@@ -9,3 +9,6 @@ bip-utils
 aiohttp
 eth-keys
 rapidfuzz
+fastapi
+uvicorn
+python-multipart

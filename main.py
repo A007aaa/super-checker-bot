@@ -8,12 +8,17 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from blockchain_checker import check_balance_all
 from seed_extractor import SeedExtractor
 
+# Configurações de Log
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Variáveis de Ambiente
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-extractor = SeedExtractor()
+# URL do Railway (ex: https://projeto.up.railway.app) - O Railway fornece isso via variável de ambiente RAILWAY_STATIC_URL ou PUBLIC_DOMAIN
+WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL") or os.getenv("PUBLIC_DOMAIN")
+PORT = int(os.getenv("PORT", 8080))
 
+extractor = SeedExtractor()
 user_word_pools = {}
 MAX_PARALLEL_SEEDS = 40 # Ajustado para Estabilidade de Memória no Railway
 
@@ -21,7 +26,7 @@ def get_results_file_path(user_id):
     return f"achados_com_saldo_{user_id}.txt"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🚀 **MODO HYPER TURBO 2.0 ATIVADO!** ⚡🔥\n\nVarredura instantânea com prioridade em saldos confirmados. Envie suas palavras ou arquivos!")
+    await update.message.reply_text("🚀 **MODO SERVERLESS ATIVADO!** ⚡🔥\n\nO bot agora opera em modo Webhook para máxima economia e performance. Envie suas palavras ou arquivos!")
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -62,23 +67,18 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     status_msg = await update.message.reply_text(f"⚡ Verificando {total} combinações...")
 
     found_count = 0
-    # Processamento ultra agressivo em lotes
-    # Aumentamos o lote para reduzir o overhead de agendamento de tarefas
     for i in range(0, total, MAX_PARALLEL_SEEDS):
         batch = seeds[i:i + MAX_PARALLEL_SEEDS]
-        # Executa o lote de verificações de forma concorrente
         results = await asyncio.gather(*[process_seed_silent(user_id, seed, update) for seed in batch], return_exceptions=True)
         found_count += sum(1 for r in results if isinstance(r, bool) and r)
         
-        # Atualização frequente de status
         progress = min(i + MAX_PARALLEL_SEEDS, total)
-        # Atualização de status mais frequente, mas com um pequeno delay para não sobrecarregar o Telegram
         if (i // MAX_PARALLEL_SEEDS) % 5 == 0 or (i + MAX_PARALLEL_SEEDS) >= total:
             try:
                 await status_msg.edit_text(f"🚀 Progresso: {progress}/{total} | 🎯 Achados: {found_count}")
             except Exception as e:
                 logger.warning(f"Erro ao enviar mensagem de progresso: {e}")
-        await asyncio.sleep(0.1) # Pequeno delay para evitar flood de edições de mensagem
+        await asyncio.sleep(0.1)
 
     if found_count > 0:
         await update.message.reply_document(document=open(get_results_file_path(user_id), 'rb'), caption=f"✅ Varredura Concluída! {found_count} saldos localizados.")
@@ -106,18 +106,33 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN não está definido. Por favor, defina a variável de ambiente.")
+        logger.error("TELEGRAM_BOT_TOKEN não está definido.")
         exit(1)
+        
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check_pool))
-    app.add_handler(CommandHandler("solve", check_pool)) # Alias para conveniência
+    app.add_handler(CommandHandler("solve", check_pool))
     app.add_handler(CommandHandler("clear", clear_pool))
     app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_input))
     
-    print("Bot iniciado. Aguardando mensagens...")
-    # Força bruta: drop_pending_updates=True limpa mensagens antigas e derruba instâncias em conflito
-    app.run_polling(drop_pending_updates=True, close_loop=True)
+    if WEBHOOK_URL:
+        # Configuração para Webhook (Modo Serverless)
+        webhook_path = f"/{TELEGRAM_BOT_TOKEN}"
+        full_webhook_url = f"https://{WEBHOOK_URL}{webhook_path}"
+        
+        logger.info(f"Iniciando em modo WEBHOOK: {full_webhook_url}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=webhook_path,
+            webhook_url=full_webhook_url,
+            drop_pending_updates=True
+        )
+    else:
+        # Fallback para Polling se a URL não estiver configurada
+        logger.info("RAILWAY_STATIC_URL não encontrada. Iniciando em modo POLLING...")
+        app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
