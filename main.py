@@ -116,23 +116,23 @@ def main():
     app.add_handler(CommandHandler("clear", clear_pool))
     app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_input))
     
-    if WEBHOOK_URL:
-        # Configuração para Webhook (Modo Serverless)
-        webhook_path = f"/{TELEGRAM_BOT_TOKEN}"
-        full_webhook_url = f"https://{WEBHOOK_URL}{webhook_path}"
+    # MODO SERVERLESS FORÇADO: Webhooks são obrigatórios
+    if not WEBHOOK_URL:
+        logger.error("ERRO: PUBLIC_DOMAIN ou RAILWAY_STATIC_URL não configurado. Webhook é obrigatório para modo Serverless.")
+        # Tenta usar o domínio padrão se não houver variável, mas avisa
+        WEBHOOK_URL = "zucchini-playfulness-production.up.railway.app"
         
-        logger.info(f"Iniciando em modo WEBHOOK: {full_webhook_url}")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=webhook_path,
-            webhook_url=full_webhook_url,
-            drop_pending_updates=True
-        )
-    else:
-        # Fallback para Polling se a URL não estiver configurada
-        logger.info("RAILWAY_STATIC_URL não encontrada. Iniciando em modo POLLING...")
-        app.run_polling(drop_pending_updates=True)
+    webhook_path = f"/{TELEGRAM_BOT_TOKEN}"
+    full_webhook_url = f"https://{WEBHOOK_URL}{webhook_path}"
+    
+    logger.info(f"Iniciando em modo WEBHOOK (Serverless): {full_webhook_url}")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=webhook_path,
+        webhook_url=full_webhook_url,
+        drop_pending_updates=True
+    )
 
 if __name__ == "__main__":
     main()
