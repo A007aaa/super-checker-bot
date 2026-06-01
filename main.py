@@ -128,11 +128,20 @@ async def main():
 
     # Mantém o bot rodando
     try:
+        logger.info("Bot e Servidor Web iniciados com sucesso!")
         while True:
             await asyncio.sleep(3600)
+    except Exception as e:
+        logger.error(f"ERRO FATAL DURANTE EXECUÇÃO: {e}")
+        raise e
     finally:
         await app.stop()
         await app.shutdown()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.error(f"ERRO AO INICIAR O BOT: {e}")
+        import sys
+        sys.exit(1)
