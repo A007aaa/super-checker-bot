@@ -118,12 +118,22 @@ def main():
     
     # MODO SERVERLESS FORÇADO: Webhooks são obrigatórios
     if not WEBHOOK_URL:
-        logger.error("ERRO: PUBLIC_DOMAIN ou RAILWAY_STATIC_URL não configurado. Webhook é obrigatório para modo Serverless.")
         # Tenta pegar a URL do Render se as outras falharem
-        WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL", "").replace("https://", "").replace("http://", "") or "zucchini-playfulness-production.up.railway.app"
+        render_url = os.getenv("RENDER_EXTERNAL_URL", "").replace("https://", "").replace("http://", "")
+        if render_url:
+            WEBHOOK_URL = render_url
+            logger.info(f"URL do Render detectada: {WEBHOOK_URL}")
+        else:
+            logger.error("ERRO: Nenhuma URL de Webhook configurada (PUBLIC_DOMAIN, RENDER_EXTERNAL_URL, etc).")
+            # Fallback seguro para evitar crash imediato
+            WEBHOOK_URL = "zucchini-playfulness-production.up.railway.app"
         
     webhook_path = f"/{TELEGRAM_BOT_TOKEN}"
     full_webhook_url = f"https://{WEBHOOK_URL}{webhook_path}"
+    
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("CRÍTICO: TELEGRAM_BOT_TOKEN não encontrado nas variáveis de ambiente!")
+        return
     
     # LIMPEZA TOTAL: Antes de iniciar, deletamos qualquer conexão antiga para evitar erro 409
     async def cleanup():
