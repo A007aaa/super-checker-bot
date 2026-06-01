@@ -1,147 +1,96 @@
 import os
 import logging
-import tempfile
 import asyncio
 import re
+import tempfile
 from aiohttp import web
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from blockchain_checker import check_balance_all
 from seed_extractor import SeedExtractor
 
-# Configurações de Log
-logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
+# Configuração de Logs
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Variáveis de Ambiente
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL") or os.getenv("PUBLIC_DOMAIN") or os.getenv("RENDER_EXTERNAL_URL")
+# Configurações
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PORT = int(os.getenv("PORT", 8080))
+DOMAIN = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_DOMAIN")
 
 extractor = SeedExtractor()
 user_word_pools = {}
-MAX_PARALLEL_SEEDS = 40
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🚀 **MODO SERVERLESS ATIVADO!** ⚡🔥\n\nO bot agora opera em modo Webhook com Health Check ativo.")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚀 Bot Online no Render!")
 
-async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    user_word_pools[user_id] = []
-    await update.message.reply_text("🗑️ Memória limpa.")
-
-async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     words = user_word_pools.get(user_id, [])
     if not words:
-        await update.message.reply_text("❌ Sem palavras. Envie texto ou arquivo primeiro.")
+        await update.message.reply_text("❌ Sem palavras.")
         return
-    full_text = " ".join(words)
-    seeds = extractor.extract_all_seeds(full_text)
-    total = len(seeds)
-    status_msg = await update.message.reply_text(f"⚡ Verificando {total} combinações...")
-    found_count = 0
-    for i in range(0, total, MAX_PARALLEL_SEEDS):
-        batch = seeds[i:i + MAX_PARALLEL_SEEDS]
-        results = await asyncio.gather(*[process_seed_silent(user_id, seed, update) for seed in batch], return_exceptions=True)
-        found_count += sum(1 for r in results if isinstance(r, bool) and r)
-        progress = min(i + MAX_PARALLEL_SEEDS, total)
-        if (i // MAX_PARALLEL_SEEDS) % 5 == 0 or (i + MAX_PARALLEL_SEEDS) >= total:
-            try: await status_msg.edit_text(f"🚀 Progresso: {progress}/{total} | 🎯 Achados: {found_count}")
-            except: pass
-        await asyncio.sleep(0.1)
-    await update.message.reply_text(f"✅ Varredura Concluída. Total: {total} | Achados: {found_count}")
-
-async def process_seed_silent(user_id, seed, update):
-    try:
+    seeds = extractor.extract_all_seeds(" ".join(words))
+    await update.message.reply_text(f"⚡ Verificando {len(seeds)} seeds...")
+    for seed in seeds:
         res = await check_balance_all(seed)
         if res:
-            seed, found = res
-            msg = f"🎯 **SALDO ENCONTRADO!**\n`{seed}`\n"
+            s, found = res
+            msg = f"🎯 **ACHADO!**\n`{s}`\n"
             for c, a, b in found: msg += f"• {c}: {b}\n"
             await update.message.reply_text(msg, parse_mode='Markdown')
-            return True
-    except: pass
-    return False
+    await update.message.reply_text("✅ Fim.")
 
-async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in user_word_pools: user_word_pools[user_id] = []
-    text = ""
-    if update.message.document:
-        file = await context.bot.get_file(update.message.document.file_id)
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            await file.download_to_drive(tmp.name)
-            with open(tmp.name, 'r', encoding='utf-8', errors='ignore') as f: text = f.read()
-        os.unlink(tmp.name)
-    else: text = update.message.text
+    text = update.message.text or ""
     new_words = re.findall(r'\b[a-z]+\b', text.lower())
     user_word_pools[user_id].extend(new_words)
-    await update.message.reply_text(f"📥 {len(new_words)} palavras prontas. Use /check.")
+    await update.message.reply_text(f"📥 {len(new_words)} palavras prontas.")
 
-# --- Servidor Web para Health Check ---
-async def health_check(request):
-    return web.Response(text="OK", status=200)
+# --- Web Server ---
+async def handle_root(request):
+    return web.Response(text="Bot is running")
 
-async def telegram_webhook(request):
+async def handle_webhook(request):
     app = request.app['bot_app']
-    update = Update.de_json(await request.json(), app.bot)
+    data = await request.json()
+    update = Update.de_json(data, app.bot)
     await app.process_update(update)
     return web.Response(status=200)
 
 async def main():
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN ausente.")
+    if not TOKEN:
+        logger.error("TOKEN MISSING")
         return
 
-    # Configuração do Bot
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check_pool))
-    app.add_handler(CommandHandler("solve", check_pool))
-    app.add_handler(CommandHandler("clear", clear_pool))
-    app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_input))
+    app.add_handler(MessageHandler(filters.TEXT, handle_input))
 
     await app.initialize()
     await app.start()
 
-    # Configuração de URL
-    url = WEBHOOK_URL or "zucchini-playfulness-production.up.railway.app"
-    url = url.replace("https://", "").replace("http://", "")
-    webhook_url = f"https://{url}/{TELEGRAM_BOT_TOKEN}"
-    
-    logger.info(f"Configurando Webhook em: {webhook_url}")
-    await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+    if DOMAIN:
+        url = DOMAIN.replace("https://", "").replace("http://", "")
+        await app.bot.set_webhook(f"https://{url}/{TOKEN}")
+        logger.info(f"Webhook set: https://{url}/{TOKEN}")
 
-    # Servidor Web AIOHTTP
     web_app = web.Application()
     web_app['bot_app'] = app
-    web_app.router.add_get('/', health_check)
-    web_app.router.add_post(f"/{TELEGRAM_BOT_TOKEN}", telegram_webhook)
+    web_app.router.add_get('/', handle_root)
+    web_app.router.add_post(f"/{TOKEN}", handle_webhook)
 
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
-    
-    logger.info(f"Servidor Web rodando na porta {PORT}")
     await site.start()
+    logger.info(f"Server started on port {PORT}")
 
-    # Mantém o bot rodando
-    try:
-        logger.info("Bot e Servidor Web iniciados com sucesso!")
-        while True:
-            await asyncio.sleep(3600)
-    except Exception as e:
-        logger.error(f"ERRO FATAL DURANTE EXECUÇÃO: {e}")
-        raise e
-    finally:
-        await app.stop()
-        await app.shutdown()
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        logger.error(f"ERRO AO INICIAR O BOT: {e}")
-        import sys
-        sys.exit(1)
+    asyncio.run(main())
