@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # Variáveis de Ambiente
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # URL do Railway (ex: https://projeto.up.railway.app) - O Railway fornece isso via variável de ambiente RAILWAY_STATIC_URL ou PUBLIC_DOMAIN
-WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL") or os.getenv("PUBLIC_DOMAIN")
+WEBHOOK_URL = os.getenv("RAILWAY_STATIC_URL") or os.getenv("PUBLIC_DOMAIN") or os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8080))
 
 extractor = SeedExtractor()
@@ -119,7 +119,8 @@ def main():
     # MODO SERVERLESS FORÇADO: Webhooks são obrigatórios
     if not WEBHOOK_URL:
         logger.error("ERRO: PUBLIC_DOMAIN ou RAILWAY_STATIC_URL não configurado. Webhook é obrigatório para modo Serverless.")
-        WEBHOOK_URL = "zucchini-playfulness-production.up.railway.app"
+        # Tenta pegar a URL do Render se as outras falharem
+        WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL", "").replace("https://", "").replace("http://", "") or "zucchini-playfulness-production.up.railway.app"
         
     webhook_path = f"/{TELEGRAM_BOT_TOKEN}"
     full_webhook_url = f"https://{WEBHOOK_URL}{webhook_path}"
