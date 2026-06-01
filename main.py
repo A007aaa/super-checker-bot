@@ -20,7 +20,7 @@ DOMAIN = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_DOMAIN")
 
 extractor = SeedExtractor()
 user_word_pools = {}
-MAX_PARALLEL_SEEDS = 40
+MAX_PARALLEL_SEEDS = 80
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🚀 Bot Online e pronto para processar arquivos! Envie suas palavras ou arquivos .txt.")
