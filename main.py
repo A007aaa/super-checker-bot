@@ -10,20 +10,21 @@ from blockchain_checker import check_balance_all
 from seed_extractor import SeedExtractor
 
 # Configuração de Logs
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configurações
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PORT = int(os.getenv("PORT", 8080))
-DOMAIN = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_DOMAIN")
+# Se não houver domínio configurado, assumimos que é LOCAL (PC)
+DOMAIN = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_DOMAIN") or os.getenv("RAILWAY_STATIC_URL")
 
 extractor = SeedExtractor()
 user_word_pools = {}
 MAX_PARALLEL_SEEDS = 80
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 Bot Online e pronto para processar arquivos! Envie suas palavras ou arquivos .txt.")
+    await update.message.reply_text("🚀 **BOT INICIADO COM SUCESSO!**\n\nEnvie seus arquivos .txt ou palavras soltas e use /check para verificar saldos.")
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -83,27 +84,30 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text = update.message.text or ""
         
-    new_words = re.findall(r'\b[a-z]+\b', text.lower())
+    new_words = re.findall(r'\b[a-z]{3,}\b', text.lower())
     user_word_pools[user_id].extend(new_words)
-    await update.message.reply_text(f"📥 {len(new_words)} palavras prontas. Use /check para iniciar.")
+    await update.message.reply_text(f"📥 {len(new_words)} palavras prontas. Use /check.")
 
-# --- Web Server para Health Check do Render ---
-async def handle_root(request):
-    return web.Response(text="Bot is running", status=200)
-
+# --- Web Server (Health Check) ---
+async def handle_root(request): return web.Response(text="OK")
 async def handle_webhook(request):
     app = request.app['bot_app']
-    try:
-        data = await request.json()
-        update = Update.de_json(data, app.bot)
-        await app.process_update(update)
-    except Exception as e:
-        logger.error(f"Webhook Error: {e}")
+    update = Update.de_json(await request.json(), app.bot)
+    await app.process_update(update)
     return web.Response(status=200)
+
+async def run_web_server(app):
+    web_app = web.Application()
+    web_app['bot_app'] = app
+    web_app.router.add_get('/', handle_root)
+    web_app.router.add_post(f"/{TOKEN}", handle_webhook)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', PORT).start()
 
 async def main():
     if not TOKEN:
-        logger.error("TOKEN MISSING")
+        print("❌ ERRO: Defina a variável de ambiente TELEGRAM_BOT_TOKEN")
         return
 
     app = Application.builder().token(TOKEN).build()
@@ -112,30 +116,23 @@ async def main():
     app.add_handler(CommandHandler("clear", clear_pool))
     app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_input))
 
-    await app.initialize()
-    await app.start()
-
-    # Configurar Webhook
     if DOMAIN:
+        # MODO NUVEM (WEBHOOK)
+        logger.info("Iniciando em MODO WEBHOOK (Nuvem)")
+        await app.initialize()
+        await app.start()
         url = DOMAIN.replace("https://", "").replace("http://", "")
-        webhook_url = f"https://{url}/{TOKEN}"
-        await app.bot.set_webhook(webhook_url, drop_pending_updates=True)
-        logger.info(f"Webhook set: {webhook_url}")
-
-    # Iniciar Servidor Web
-    web_app = web.Application()
-    web_app['bot_app'] = app
-    web_app.router.add_get('/', handle_root)
-    web_app.router.add_post(f"/{TOKEN}", handle_webhook)
-
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    logger.info(f"Server started on port {PORT}")
-
-    while True:
-        await asyncio.sleep(3600)
+        await app.bot.set_webhook(f"https://{url}/{TOKEN}", drop_pending_updates=True)
+        await run_web_server(app)
+        while True: await asyncio.sleep(3600)
+    else:
+        # MODO LOCAL (POLLING)
+        logger.info("Iniciando em MODO POLLING (Local/PC)")
+        await app.initialize()
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        await app.start()
+        await app.updater.start_polling()
+        while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main())
