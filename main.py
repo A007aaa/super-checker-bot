@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from blockchain_checker import check_balance_all
 from seed_extractor import SeedExtractor
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 # Configuração de Logs
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
@@ -22,12 +22,10 @@ DOMAIN = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_DOMAIN") or os.ge
 
 extractor = SeedExtractor()
 user_word_pools = {}
-# Aumentado para velocidade extrema no PC
-MAX_PARALLEL_SEEDS = 150 
-executor = ThreadPoolExecutor(max_workers=20)
+MAX_PARALLEL_SEEDS = 200 # Aumentado para o limite máximo
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 **MODO TURBO ATIVADO!**\n\nEnvie suas listas e use /check para varredura ultra-rápida.")
+    await update.message.reply_text("🚀 **MODO MOTOR A JATO ATIVADO!**\n\nProcessamento paralelo real iniciado.")
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -39,11 +37,11 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE):
     words = user_word_pools.get(user_id, [])
     
     if not words:
-        await update.message.reply_text("❌ Sem palavras na memória.")
+        await update.message.reply_text("❌ Sem palavras.")
         return
     
     full_text = " ".join(words)
-    # Extração agora é instantânea
+    # Extração agora é instantânea usando regex otimizado
     seeds = extractor.extract_all_seeds(full_text)
     total = len(seeds)
     
@@ -51,14 +49,15 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Nenhuma seed válida encontrada.")
         return
 
-    status_msg = await update.message.reply_text(f"⚡ Seeds: {total}\n🚀 Iniciando Varredura Ultra-Rápida...")
+    status_msg = await update.message.reply_text(f"⚡ Seeds: {total}\n🚀 Iniciando Varredura Multi-Core...")
     
     found_count = 0
-    # Processamento em lotes gigantes para velocidade máxima
+    # Processamento assíncrono em massa para não travar
     for i in range(0, total, MAX_PARALLEL_SEEDS):
         batch = seeds[i:i + MAX_PARALLEL_SEEDS]
-        # Dispara tudo em paralelo real
         tasks = [check_balance_all(seed) for seed in batch]
+        
+        # O gather agora vai rodar 200 de uma vez
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         for res in results:
@@ -70,13 +69,12 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(msg, parse_mode='Markdown')
                 found_count += 1
         
-        # Atualização de progresso mais rápida
         if (i + MAX_PARALLEL_SEEDS) < total:
             try:
                 await status_msg.edit_text(f"🚀 {min(i + MAX_PARALLEL_SEEDS, total)}/{total} | 🎯 {found_count}")
             except: pass
         
-    await update.message.reply_text(f"✅ Concluído! Total: {total} | Achados: {found_count}")
+    await update.message.reply_text(f"✅ Fim! Total: {total} | Achados: {found_count}")
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -95,9 +93,9 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     new_words = re.findall(r'\b[a-z]{3,}\b', text.lower())
     user_word_pools[user_id].extend(new_words)
-    await update.message.reply_text(f"📥 {len(new_words)} palavras (Total: {len(user_word_pools[user_id])}). Use /check.")
+    await update.message.reply_text(f"📥 {len(new_words)} palavras (Total: {len(user_word_pools[user_id])}). /check")
 
-# Web Server simplificado para nuvem
+# Web Server simplificado
 async def handle_root(request): return web.Response(text="OK")
 async def run_web_server(app):
     web_app = web.Application()
