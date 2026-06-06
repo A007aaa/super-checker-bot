@@ -7,25 +7,23 @@ import nest_asyncio
 from aiohttp import web
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from blockchain_checker import check_balance_all
+from blockchain_checker import process_all_seeds
 from seed_extractor import SeedExtractor
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 # Configuração de Logs
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configurações de Performance
+# Configurações
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PORT = int(os.getenv("PORT", 8080))
 DOMAIN = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_DOMAIN") or os.getenv("RAILWAY_STATIC_URL")
 
 extractor = SeedExtractor()
 user_word_pools = {}
-MAX_PARALLEL_SEEDS = 200 # Aumentado para o limite máximo
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 **MODO MOTOR A JATO ATIVADO!**\n\nProcessamento paralelo real iniciado.")
+    await update.message.reply_text("🚀 **MODO TURBO 4.0 ATIVADO!**\n\nProcessamento por Lotes (Batching) e Multiprocessing real iniciado.")
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -37,44 +35,32 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE):
     words = user_word_pools.get(user_id, [])
     
     if not words:
-        await update.message.reply_text("❌ Sem palavras.")
+        await update.message.reply_text("❌ Sem palavras. Envie um arquivo ou texto primeiro.")
         return
     
     full_text = " ".join(words)
-    # Extração agora é instantânea usando regex otimizado
     seeds = extractor.extract_all_seeds(full_text)
     total = len(seeds)
     
     if total == 0:
-        await update.message.reply_text("⚠️ Nenhuma seed válida encontrada.")
+        await update.message.reply_text("⚠️ Nenhuma seed válida encontrada na lista.")
         return
 
-    status_msg = await update.message.reply_text(f"⚡ Seeds: {total}\n🚀 Iniciando Varredura Multi-Core...")
+    status_msg = await update.message.reply_text(f"⚡ Seeds: {total}\n🚀 Iniciando Varredura Ultra-Sônica...")
+    
+    # Processar todas as seeds usando o novo sistema de Batching
+    # O process_all_seeds já gerencia o paralelismo e o batching interno
+    results_map = await process_all_seeds(seeds)
     
     found_count = 0
-    # Processamento assíncrono em massa para não travar
-    for i in range(0, total, MAX_PARALLEL_SEEDS):
-        batch = seeds[i:i + MAX_PARALLEL_SEEDS]
-        tasks = [check_balance_all(seed) for seed in batch]
+    for seed, findings in results_map.items():
+        msg = f"🎯 **ACHADO!**\n`{seed}`\n"
+        for net, addr, bal in findings:
+            msg += f"• {net}: {bal:.6f}\n"
+        await update.message.reply_text(msg, parse_mode='Markdown')
+        found_count += 1
         
-        # O gather agora vai rodar 200 de uma vez
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for res in results:
-            if res and not isinstance(res, Exception):
-                s, found = res
-                msg = f"🎯 **ACHADO!**\n`{s}`\n"
-                for net, addr, bal in found:
-                    msg += f"• {net}: {bal:.6f}\n"
-                await update.message.reply_text(msg, parse_mode='Markdown')
-                found_count += 1
-        
-        if (i + MAX_PARALLEL_SEEDS) < total:
-            try:
-                await status_msg.edit_text(f"🚀 {min(i + MAX_PARALLEL_SEEDS, total)}/{total} | 🎯 {found_count}")
-            except: pass
-        
-    await update.message.reply_text(f"✅ Fim! Total: {total} | Achados: {found_count}")
+    await update.message.reply_text(f"✅ **Fim da Varredura!**\n\nTotal Processado: {total}\nAchados com Saldo: {found_count}")
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -91,13 +77,14 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text = update.message.text or ""
         
+    # Extrator otimizado para identificar palavras BIP39 rapidamente
     new_words = re.findall(r'\b[a-z]{3,}\b', text.lower())
     user_word_pools[user_id].extend(new_words)
-    await update.message.reply_text(f"📥 {len(new_words)} palavras (Total: {len(user_word_pools[user_id])}). /check")
+    await update.message.reply_text(f"📥 Recebidas {len(new_words)} palavras.\nTotal na memória: {len(user_word_pools[user_id])}\n\nUse /check para iniciar.")
 
-# Web Server simplificado
+# Web Server simplificado para Health Check
 async def handle_root(request): return web.Response(text="OK")
-async def run_web_server(app):
+async def run_web_server():
     web_app = web.Application()
     web_app.router.add_get('/', handle_root)
     runner = web.AppRunner(web_app)
@@ -105,7 +92,10 @@ async def run_web_server(app):
     await web.TCPSite(runner, '0.0.0.0', PORT).start()
 
 async def main():
-    if not TOKEN: return
+    if not TOKEN:
+        logger.error("Token não configurado!")
+        return
+        
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check_pool))
@@ -116,7 +106,7 @@ async def main():
         await app.initialize()
         await app.start()
         await app.bot.set_webhook(f"https://{DOMAIN.replace('https://','').replace('http://','')}/{TOKEN}")
-        await run_web_server(app)
+        await run_web_server()
         while True: await asyncio.sleep(3600)
     else:
         await app.run_polling(drop_pending_updates=True)
