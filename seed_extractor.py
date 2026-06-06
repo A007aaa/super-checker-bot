@@ -1,74 +1,45 @@
 import re
 import logging
 from mnemonic import Mnemonic
-import base58
-from rapidfuzz import process, fuzz
 
 logger = logging.getLogger(__name__)
 
 class SeedExtractor:
     def __init__(self):
         self.mnemo = Mnemonic("english")
-        self.wordlist = list(self.mnemo.wordlist)
         self.wordlist_set = set(self.mnemo.wordlist)
 
-    def is_valid_bip39(self, seed):
-        try:
-            return self.mnemo.check(seed)
-        except:
-            return False
-
     def extract_all_seeds(self, text):
-        results = self.extract_all(text)
-        return [val for type, val in results if type == "SEED"]
-
-    def extract_all(self, text):
         if not text: return []
-        results = []
         
-        # 1. Extração Ultra-Rápida de Chaves
-        # Focamos nos padrões mais comuns para não perder tempo
-        keys = re.findall(r'(?:0x)?([0-9a-fA-F]{64})', text)
-        for key in keys:
-            results.append(("KEY_HEX", key))
-
-        # 2. MODO WARP: Processamento de BIP39 de Alta Performance
-        # Filtramos todas as palavras válidas do texto de uma só vez para velocidade máxima
-        # OTIMIZAÇÃO EXTREMA: Filtramos apenas palavras que existem na lista BIP39
-        # Isso reduz o tamanho do processamento em 90%
+        # 1. Limpeza e Extração de Palavras
+        # Pegamos apenas palavras que pertencem à lista BIP39 oficial
         all_words = re.findall(r'\b[a-z]{3,}\b', text.lower())
         valid_words = [w for w in all_words if w in self.wordlist_set]
         num_total = len(valid_words)
         
-        if num_total >= 12:
-            # Janela deslizante ultra-rápida (apenas 12, 15, 18, 21 e 24 palavras)
-            # Focamos em 12 e 24 primeiro por serem as mais comuns
-            for length in [12, 24, 15, 18, 21]:
-                if num_total < length: continue
-                for i in range(num_total - length + 1):
-                    phrase = " ".join(valid_words[i : i + length])
-                    # Checksum matemático local (instantâneo)
-                    if self.mnemo.check(phrase):
-                        results.append(("SEED", phrase))
-
-            # 4. BUSCA POR JANELA DESLIZANTE COM SALTO (Skip Logic)
-            # Tenta encontrar seeds mesmo que haja palavras intrusas entre elas
-            if 12 <= num_total <= 50:
+        seeds_found = set()
+        
+        # 2. Busca por Janela Deslizante (12 e 24 palavras são as principais)
+        # Este método é ultra-rápido para listas onde as palavras estão em ordem
+        for length in [12, 24, 15, 18, 21]:
+            if num_total < length: continue
+            for i in range(num_total - length + 1):
+                phrase = " ".join(valid_words[i : i + length])
+                if self.mnemo.check(phrase):
+                    seeds_found.add(phrase)
+        
+        # 3. Busca por Blocos (Se a lista for enviada em linhas)
+        # Algumas listas têm uma seed por linha mesmo com palavras extras
+        lines = text.lower().splitlines()
+        for line in lines:
+            line_words = [w for w in re.findall(r'\b[a-z]{3,}\b', line) if w in self.wordlist_set]
+            if len(line_words) >= 12:
                 for length in [12, 24]:
-                    for i in range(num_total - length + 1):
-                        # Tenta combinações de palavras próximas
-                        potential_chunk = valid_words[i:i+length+2] # Pega um pouco mais para permitir saltos
-                        if len(potential_chunk) >= length:
-                            # Tenta combinações básicas dentro do chunk
-                            pass
-        
-        
-        # Remover duplicatas mantendo a ordem
-        seen = set()
-        unique_results = []
-        for t, v in results:
-            if v not in seen:
-                unique_results.append((t, v))
-                seen.add(v)
-        
-        return unique_results
+                    if len(line_words) >= length:
+                        for i in range(len(line_words) - length + 1):
+                            phrase = " ".join(line_words[i : i + length])
+                            if self.mnemo.check(phrase):
+                                seeds_found.add(phrase)
+
+        return list(seeds_found)

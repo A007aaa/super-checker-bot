@@ -16,58 +16,61 @@ logger = logging.getLogger(__name__)
 # Configurações
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PORT = int(os.getenv("PORT", 8080))
-# Se não houver domínio configurado, assumimos que é LOCAL (PC)
 DOMAIN = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_DOMAIN") or os.getenv("RAILWAY_STATIC_URL")
 
 extractor = SeedExtractor()
 user_word_pools = {}
-MAX_PARALLEL_SEEDS = 80
+MAX_PARALLEL_SEEDS = 40 # Reduzi um pouco para estabilidade no PC e RPC
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 **BOT INICIADO COM SUCESSO!**\n\nEnvie seus arquivos .txt ou palavras soltas e use /check para verificar saldos.")
+    await update.message.reply_text("🚀 **SUPER CHECKER ATIVO!**\n\n1. Envie seu arquivo .txt ou cole as palavras.\n2. Use /check para iniciar a busca.\n3. Use /clear para limpar a memória.")
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_word_pools[user_id] = []
-    await update.message.reply_text("🗑️ Memória limpa.")
+    await update.message.reply_text("🗑️ Memória limpa com sucesso.")
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     words = user_word_pools.get(user_id, [])
+    
     if not words:
-        await update.message.reply_text("❌ Sem palavras. Envie texto ou arquivo primeiro.")
+        await update.message.reply_text("❌ Nenhuma palavra encontrada na memória. Envie um arquivo ou texto primeiro.")
         return
+    
+    await update.message.reply_text(f"🔍 Analisando {len(words)} palavras...")
     
     full_text = " ".join(words)
     seeds = extractor.extract_all_seeds(full_text)
     total = len(seeds)
     
-    status_msg = await update.message.reply_text(f"⚡ Verificando {total} seeds...")
+    if total == 0:
+        await update.message.reply_text("⚠️ Nenhuma frase-semente (12/24 palavras) válida encontrada. Verifique se as palavras estão corretas.")
+        return
+
+    status_msg = await update.message.reply_text(f"⚡ Encontradas {total} seeds válidas matematicamente.\nIniciando verificação de saldo...")
     
     found_count = 0
     for i in range(0, total, MAX_PARALLEL_SEEDS):
         batch = seeds[i:i + MAX_PARALLEL_SEEDS]
-        results = await asyncio.gather(*[process_seed_silent(user_id, seed, update) for seed in batch], return_exceptions=True)
-        found_count += sum(1 for r in results if isinstance(r, bool) and r)
+        tasks = [check_balance_all(seed) for seed in batch]
+        results = await asyncio.gather(*tasks)
+        
+        for res in results:
+            if res:
+                s, found = res
+                msg = f"🎯 **SALDO ENCONTRADO!**\n\n`{s}`\n\n"
+                for net, addr, bal in found:
+                    msg += f"💰 {net}: {bal:.6f}\n"
+                await update.message.reply_text(msg, parse_mode='Markdown')
+                found_count += 1
         
         if (i + MAX_PARALLEL_SEEDS) < total:
-            try: await status_msg.edit_text(f"🚀 Progresso: {min(i + MAX_PARALLEL_SEEDS, total)}/{total} | 🎯 Achados: {found_count}")
+            try:
+                await status_msg.edit_text(f"🚀 Progresso: {min(i + MAX_PARALLEL_SEEDS, total)}/{total} | 🎯 Sucessos: {found_count}")
             except: pass
-        await asyncio.sleep(0.1)
         
-    await update.message.reply_text(f"✅ Varredura Concluída. Total: {total} | Achados: {found_count}")
-
-async def process_seed_silent(user_id, seed, update):
-    try:
-        res = await check_balance_all(seed)
-        if res:
-            s, found = res
-            msg = f"🎯 **SALDO ENCONTRADO!**\n`{s}`\n"
-            for c, a, b in found: msg += f"• {c}: {b}\n"
-            await update.message.reply_text(msg, parse_mode='Markdown')
-            return True
-    except: pass
-    return False
+    await update.message.reply_text(f"✅ Fim da varredura!\n\nTotal de seeds: {total}\nCom saldo: {found_count}")
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -75,6 +78,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = ""
     if update.message.document:
+        await update.message.reply_text("📥 Baixando arquivo...")
         file = await context.bot.get_file(update.message.document.file_id)
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             await file.download_to_drive(tmp.name)
@@ -84,9 +88,10 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text = update.message.text or ""
         
+    # Extrair apenas palavras que podem ser parte de uma seed (letras a-z, min 3 letras)
     new_words = re.findall(r'\b[a-z]{3,}\b', text.lower())
     user_word_pools[user_id].extend(new_words)
-    await update.message.reply_text(f"📥 {len(new_words)} palavras prontas. Use /check.")
+    await update.message.reply_text(f"✅ {len(new_words)} palavras adicionadas à memória.\nTotal agora: {len(user_word_pools[user_id])}\n\nUse /check para começar.")
 
 # --- Web Server (Health Check) ---
 async def handle_root(request): return web.Response(text="OK")
@@ -107,7 +112,7 @@ async def run_web_server(app):
 
 async def main():
     if not TOKEN:
-        print("❌ ERRO: Defina a variável de ambiente TELEGRAM_BOT_TOKEN")
+        logger.error("TELEGRAM_BOT_TOKEN não definido!")
         return
 
     app = Application.builder().token(TOKEN).build()
@@ -117,8 +122,7 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_input))
 
     if DOMAIN:
-        # MODO NUVEM (WEBHOOK)
-        logger.info("Iniciando em MODO WEBHOOK (Nuvem)")
+        logger.info("MODO WEBHOOK ATIVO")
         await app.initialize()
         await app.start()
         url = DOMAIN.replace("https://", "").replace("http://", "")
@@ -126,13 +130,10 @@ async def main():
         await run_web_server(app)
         while True: await asyncio.sleep(3600)
     else:
-        # MODO LOCAL (POLLING)
-        logger.info("Iniciando em MODO POLLING (Local/PC)")
-        await app.initialize()
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        await app.start()
-        await app.updater.start_polling()
-        while True: await asyncio.sleep(3600)
+        logger.info("MODO POLLING ATIVO")
+        await app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
+    import nest_asyncio
+    nest_asyncio.apply()
     asyncio.run(main())
