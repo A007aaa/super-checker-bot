@@ -12,69 +12,98 @@ semaphore = asyncio.Semaphore(50)
 async def check_sol(session, addr):
     async with semaphore:
         try:
+            logger.debug(f"Verificando SOL para {addr}")
             payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [addr]}
-            async with session.post("https://api.mainnet-beta.solana.com", json=payload, timeout=8) as res:
+            async with session.post("https://api.mainnet-beta.solana.com", json=payload, timeout=15) as res:
                 if res.status == 200:
                     data = await res.json()
                     bal = data.get('result', {}).get('value', 0) / 10**9
-                    if bal > 0: return (("SOL", addr, bal),)
-        except: pass
+                    if bal > 0:
+                        logger.info(f"Saldo encontrado: SOL {bal} em {addr}")
+                        return (("SOL", addr, bal),)
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout ao verificar SOL para {addr}")
+        except Exception as e:
+            logger.error(f"Erro ao verificar SOL para {addr}: {e}")
     return ()
 
 async def check_eth_usdt(session, addr):
     async with semaphore:
         results = []
         try:
+            logger.debug(f"Verificando ETH/USDT para {addr}")
             # ETH Balance
             payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [addr, "latest"]}
-            async with session.post("https://cloudflare-eth.com/", json=payload, timeout=8) as res:
+            async with session.post("https://cloudflare-eth.com/", json=payload, timeout=15) as res:
                 if res.status == 200:
                     data = await res.json()
                     bal = int(data.get('result', '0x0'), 16) / 10**18
-                    if bal > 0: results.append(("ETH", addr, bal))
+                    if bal > 0:
+                        logger.info(f"Saldo encontrado: ETH {bal} em {addr}")
+                        results.append(("ETH", addr, bal))
 
             # USDT (ERC20)
             usdt_contract = "0xdac17f958d2ee523a2206206994597c13d831ec7"
             data_call = "0x70a08231" + addr[2:].lower().zfill(64)
             payload_u = {"jsonrpc": "2.0", "id": 1, "method": "eth_call", "params": [{"to": usdt_contract, "data": data_call}, "latest"]}
-            async with session.post("https://cloudflare-eth.com/", json=payload_u, timeout=8) as res:
+            async with session.post("https://cloudflare-eth.com/", json=payload_u, timeout=15) as res:
                 if res.status == 200:
                     data = await res.json()
                     u_bal = int(data.get('result', '0x0'), 16) / 10**6
-                    if u_bal > 0: results.append(("USDT_ETH", addr, u_bal))
-        except: pass
+                    if u_bal > 0:
+                        logger.info(f"Saldo encontrado: USDT_ETH {u_bal} em {addr}")
+                        results.append(("USDT_ETH", addr, u_bal))
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout ao verificar ETH/USDT para {addr}")
+        except Exception as e:
+            logger.error(f"Erro ao verificar ETH/USDT para {addr}: {e}")
         return tuple(results)
 
 async def check_btc(session, addr):
     async with semaphore:
         try:
-            async with session.get(f"https://blockchain.info/q/addressbalance/{addr}", timeout=8) as res:
+            logger.debug(f"Verificando BTC para {addr}")
+            async with session.get(f"https://blockchain.info/q/addressbalance/{addr}", timeout=15) as res:
                 if res.status == 200:
                     bal = int(await res.text()) / 10**8
-                    if bal > 0: return (("BTC", addr, bal),)
-        except: pass
+                    if bal > 0:
+                        logger.info(f"Saldo encontrado: BTC {bal} em {addr}")
+                        return (("BTC", addr, bal),)
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout ao verificar BTC para {addr}")
+        except Exception as e:
+            logger.error(f"Erro ao verificar BTC para {addr}: {e}")
     return ()
 
 async def check_tron_usdt(session, addr):
     async with semaphore:
         results = []
         try:
-            async with session.get(f"https://api.trongrid.io/v1/accounts/{addr}", timeout=8) as res:
+            logger.debug(f"Verificando TRX/USDT_TRX para {addr}")
+            async with session.get(f"https://api.trongrid.io/v1/accounts/{addr}", timeout=15) as res:
                 if res.status == 200:
                     data = await res.json()
                     if data.get('data'):
                         acc = data['data'][0]
                         trx_bal = acc.get('balance', 0) / 10**6
-                        if trx_bal > 0: results.append(("TRX", addr, trx_bal))
+                        if trx_bal > 0:
+                            logger.info(f"Saldo encontrado: TRX {trx_bal} em {addr}")
+                            results.append(("TRX", addr, trx_bal))
                         trc20_list = acc.get('trc20', [])
                         for token in trc20_list:
                             if 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' in token:
                                 u_bal = float(token['TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t']) / 10**6
-                                if u_bal > 0: results.append(("USDT_TRX", addr, u_bal))
-        except: pass
+                                if u_bal > 0:
+                                    logger.info(f"Saldo encontrado: USDT_TRX {u_bal} em {addr}")
+                                    results.append(("USDT_TRX", addr, u_bal))
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout ao verificar TRX/USDT_TRX para {addr}")
+        except Exception as e:
+            logger.error(f"Erro ao verificar TRX/USDT_TRX para {addr}: {e}")
         return tuple(results)
 
 async def check_balance_master(type, value):
+    logger.info(f"Iniciando verificação de saldos: tipo={type} valor={value}")
     async with aiohttp.ClientSession() as session:
         addr_map = {} # {addr: (coin_type, check_function)}
         
@@ -155,6 +184,7 @@ async def check_balance_master(type, value):
             if isinstance(r, (list, tuple)):
                 final_found.extend(r)
             
+        logger.info(f"Verificação concluída: {len(final_found)} saldo(s) encontrado(s) para {value}")
         if final_found:
             return (value, final_found)
     return None
