@@ -25,15 +25,18 @@ user_pools = {}
 TELEGRAM_MAX_CHARS = 4096
 
 
-def format_seed_display(item_type: str, value: str) -> str:
+def format_seed_display(item_type: str, value: str, show_full: bool = False) -> str:
     """
     Formata a exibição de seeds/chaves/endereços de forma segura e compacta.
 
-    - SEED: SHA256 (primeiros 16 chars) + primeiras 3 palavras + últimas 3 palavras
+    - SEED (show_full=False): SHA256 (primeiros 16 chars) + primeiras 3 palavras + últimas 3 palavras
+    - SEED (show_full=True): seed completa, sem truncamento
     - KEY_SOL / KEY_HEX: primeiros 10 + últimos 10 caracteres
     - Endereços diretos: valor completo
     """
     if item_type == "SEED":
+        if show_full:
+            return f"SEED:\n{value}"
         sha256_hash = hashlib.sha256(value.encode()).hexdigest()[:16]
         words = value.split()
         if len(words) > 6:
@@ -53,18 +56,19 @@ def format_seed_display(item_type: str, value: str) -> str:
 def format_found_message(item_type: str, value: str, balances: list) -> str:
     """
     Monta a mensagem de saldo encontrado com estrutura clara e emojis.
+    Exibe a seed COMPLETA quando saldo é encontrado.
     Garante que o resultado não ultrapasse TELEGRAM_MAX_CHARS.
     """
-    seed_line = format_seed_display(item_type, value)
+    seed_line = format_seed_display(item_type, value, show_full=True)
 
     balance_lines = "\n".join(
         f"• {coin}: {bal}" for coin, _addr, bal in balances
     )
 
     msg = (
-        f"🎯 SALDO ENCONTRADO!\n"
+        f"🎯 SALDO ENCONTRADO!\n\n"
         f"{seed_line}\n\n"
-        f"💰 Saldos:\n"
+        f"💰 Saldos encontrados:\n"
         f"{balance_lines}"
     )
 
@@ -113,7 +117,8 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             if res:
                 found_count += 1
                 v, balances = res
-                logger.info(f"Saldo encontrado! Tipo: {item_type} | Saldos: {balances}")
+                balance_summary = " | ".join(f"{coin}: {bal}" for coin, _addr, bal in balances)
+                logger.info(f"Saldo encontrado! Tipo: {item_type} | Redes: {len(balances)} | {balance_summary}")
                 msg = format_found_message(item_type, v, balances)
                 await update.message.reply_text(msg)
         except Exception as e:
