@@ -114,18 +114,32 @@ async def check_balance_master(type, value):
             addr = value if value.startswith("0x") else f"0x{value}"
             addr_map[addr] = ("KEY_HEX", check_eth_usdt)
 
+        elif type == "ADDR_ETH":
+            # Endereço Ethereum direto → verificar ETH e USDT
+            addr_map[value] = ("ADDR_ETH", check_eth_usdt)
+
+        elif type == "ADDR_BTC":
+            # Endereço Bitcoin direto → verificar BTC
+            addr_map[value] = ("ADDR_BTC", check_btc)
+
+        elif type == "ADDR_TRON":
+            # Endereço Tron direto → verificar TRX e USDT
+            addr_map[value] = ("ADDR_TRON", check_tron_usdt)
+
+        elif type == "ADDR_SOL":
+            # Endereço Solana direto → verificar SOL
+            addr_map[value] = ("ADDR_SOL", check_sol)
+
         else:
-            # Endereço direto: detectar pelo prefixo
-            if value.startswith("0x"):
+            # Fallback: detectar pelo prefixo para tipos desconhecidos
+            if value.startswith("0x") and len(value) == 42:
                 addr_map[value] = ("ADDR_ETH", check_eth_usdt)
-            elif value.startswith("T"):
-                addr_map[value] = ("ADDR_TRX", check_tron_usdt)
-            elif value.startswith("bc1"):
-                addr_map[value] = ("ADDR_BTC_SEGWIT", check_btc)
-            elif value.startswith(("1", "3")):
-                addr_map[value] = ("ADDR_BTC_LEGACY", check_btc)
+            elif value.startswith("T") and len(value) == 34:
+                addr_map[value] = ("ADDR_TRON", check_tron_usdt)
+            elif value.startswith("bc1") or value.startswith(("1", "3")):
+                addr_map[value] = ("ADDR_BTC", check_btc)
             else:
-                # Fallback: tentar como endereço Solana
+                # Último fallback: tentar como endereço Solana
                 addr_map[value] = ("ADDR_SOL", check_sol)
 
         tasks = []

@@ -19,26 +19,47 @@ class SeedExtractor:
 
     def extract_all(self, text):
         """
-        Extrai Seeds e Keys de forma otimizada para performance.
+        Extrai Seeds, Keys e Endereços diretos de forma otimizada para performance.
         """
         if not text:
             return []
         
         results = []
-        
-        # 1. Chaves Privadas (Regex é rápido)
+
+        # 1. Endereços Ethereum (0x + 40 hex) — antes das chaves hex para evitar conflito
+        eth_addrs = re.findall(r'\b(0x[0-9a-fA-F]{40})\b', text)
+        for addr in eth_addrs:
+            results.append(("ADDR_ETH", addr))
+
+        # 2. Endereços Tron (T + 33 caracteres Base58)
+        tron_addrs = re.findall(r'\b(T[1-9A-HJ-NP-Za-km-z]{33})\b', text)
+        for addr in tron_addrs:
+            results.append(("ADDR_TRON", addr))
+
+        # 3. Endereços Bitcoin (bc1..., 1..., 3...)
+        btc_addrs = re.findall(r'\b(bc1[a-zA-HJ-NP-Z0-9]{25,87}|[13][1-9A-HJ-NP-Za-km-z]{25,34})\b', text)
+        for addr in btc_addrs:
+            results.append(("ADDR_BTC", addr))
+
+        # 4. Chaves Privadas (Regex é rápido)
         sol_keys = re.findall(r'[1-9A-HJ-NP-Za-km-z]{43,88}', text)
         for key in sol_keys:
             try:
-                if len(base58.b58decode(key)) in [32, 64]:
-                    results.append(("KEY_SOL", key))
+                decoded = base58.b58decode(key)
+                if len(decoded) in [32, 64]:
+                    # Distinguir endereço Solana (32 bytes) de chave privada (64 bytes)
+                    # Endereços Solana têm exatamente 43-44 caracteres Base58
+                    if len(decoded) == 32 and 43 <= len(key) <= 44:
+                        results.append(("ADDR_SOL", key))
+                    else:
+                        results.append(("KEY_SOL", key))
             except: continue
 
         eth_keys = re.findall(r'(?:0x)?([0-9a-fA-F]{64})', text)
         for key in eth_keys:
             results.append(("KEY_HEX", key))
 
-        # 2. Seeds BIP39 (Otimizado)
+        # 5. Seeds BIP39 (Otimizado)
         clean_text = re.sub(r'[^a-zA-Z\s]', ' ', text).lower()
         all_words = clean_text.split()
         bip39_words = [w for w in all_words if w in self.wordlist]
