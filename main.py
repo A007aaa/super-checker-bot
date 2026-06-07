@@ -99,16 +99,27 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     full_text = " ".join(pool)
-    status_msg = await update.message.reply_text("🔍 Extraindo itens do texto acumulado... Aguarde.")
+    total_chars = len(full_text)
+    logger.info(f"🔍 Iniciando extração — texto com {total_chars} caracteres")
+    status_msg = await update.message.reply_text(
+        f"🔍 Extraindo itens do texto acumulado ({total_chars} caracteres)... Aguarde."
+    )
     
     # Executa extração em thread separada para não travar o bot
     items = await asyncio.to_thread(extractor.extract_all, full_text)
     
     if not items:
+        logger.info("❌ Nenhum item encontrado após extração")
         await status_msg.edit_text("❌ Nenhuma Seed/Key encontrada.")
         return
 
-    await status_msg.edit_text(f"🔍 Encontrados {len(items)} itens. Iniciando varredura de saldos...")
+    total_items = len(items)
+    logger.info(f"✅ Extração concluída — {total_items} itens únicos encontrados. Iniciando varredura de saldos...")
+    await status_msg.edit_text(
+        f"✅ Extração concluída!\n"
+        f"📦 {total_items} itens únicos encontrados.\n"
+        f"💰 Iniciando varredura de saldos..."
+    )
     found_count = 0
 
     for i, (item_type, val) in enumerate(items):
@@ -118,18 +129,29 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 found_count += 1
                 v, balances = res
                 balance_summary = " | ".join(f"{coin}: {bal}" for coin, _addr, bal in balances)
-                logger.info(f"Saldo encontrado! Tipo: {item_type} | Redes: {len(balances)} | {balance_summary}")
+                logger.info(
+                    f"🎯 Saldo encontrado! [{i+1}/{total_items}] Tipo: {item_type} "
+                    f"| Redes: {len(balances)} | {balance_summary}"
+                )
                 msg = format_found_message(item_type, v, balances)
                 await update.message.reply_text(msg)
         except Exception as e:
-            logger.error(f"Erro ao verificar item {i+1} ({item_type}): {e}")
+            logger.error(f"Erro ao verificar item {i+1}/{total_items} ({item_type}): {e}")
 
-        
         if (i + 1) % 10 == 0:
-            try: await status_msg.edit_text(f"🔍 Progresso: {i+1}/{len(items)} | 🎯 Achados: {found_count}")
+            logger.info(f"📊 Progresso: {i+1}/{total_items} | 🎯 Achados: {found_count}")
+            try:
+                await status_msg.edit_text(
+                    f"🔍 Progresso: {i+1}/{total_items} | 🎯 Achados: {found_count}"
+                )
             except: pass
 
-    await update.message.reply_text(f"✅ Concluído! Itens: {len(items)} | Achados: {found_count}")
+    logger.info(f"✅ Varredura concluída — {total_items} itens verificados | {found_count} saldos encontrados")
+    await update.message.reply_text(
+        f"✅ Concluído!\n"
+        f"📦 Itens verificados: {total_items}\n"
+        f"🎯 Saldos encontrados: {found_count}"
+    )
     user_pools[user_id] = []
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

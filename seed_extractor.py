@@ -20,6 +20,7 @@ class SeedExtractor:
     def extract_all(self, text):
         """
         Extrai Seeds, Keys e Endereços diretos de forma otimizada para performance.
+        Suporta até 1 milhão de seed phrases sem limite artificial.
         """
         if not text:
             return []
@@ -59,34 +60,62 @@ class SeedExtractor:
         for key in eth_keys:
             results.append(("KEY_HEX", key))
 
-        # 5. Seeds BIP39 (Otimizado)
+        # 5. Seeds BIP39 — sem limite de palavras, suporta até 1 milhão
+        logger.info("🔍 Iniciando busca de seeds BIP39...")
         clean_text = re.sub(r'[^a-zA-Z\s]', ' ', text).lower()
         all_words = clean_text.split()
-        bip39_words = [w for w in all_words if w in self.wordlist]
-        
-        if len(bip39_words) >= 12:
-            # Focamos em 12 e 24 palavras para performance em arquivos gigantes
-            # Limitamos a busca para os primeiros 10.000 termos BIP39 encontrados
-            max_search = min(len(bip39_words), 10000)
-            
-            # Buscamos primeiro sequências de 12 (mais comum)
-            for i in range(max_search - 12 + 1):
-                phrase = " ".join(bip39_words[i : i + 12])
-                if self.is_valid_bip39(phrase):
-                    results.append(("SEED", phrase))
-            
-            # Depois sequências de 24
-            for i in range(max_search - 24 + 1):
-                phrase = " ".join(bip39_words[i : i + 24])
-                if self.is_valid_bip39(phrase):
-                    results.append(("SEED", phrase))
 
-        # Remover duplicatas
-        seen = set()
+        # Filtra apenas palavras BIP39 usando set para O(1) por lookup
+        bip39_words = [w for w in all_words if w in self.wordlist]
+        total_bip39 = len(bip39_words)
+        logger.info(f"📊 Total de palavras BIP39 encontradas: {total_bip39}")
+
+        if total_bip39 >= 12:
+            # Set de seeds já encontradas para deduplicação O(1)
+            seen_seeds: set = set()
+
+            # Buscamos primeiro sequências de 12 (mais comum)
+            logger.info("🔎 Buscando seeds de 12 palavras...")
+            seeds_12 = 0
+            for i in range(total_bip39 - 12 + 1):
+                if i > 0 and i % 10000 == 0:
+                    logger.info(f"   Progresso: {i} / {total_bip39 - 12 + 1} | Seeds encontradas: {seeds_12}")
+                phrase = " ".join(bip39_words[i : i + 12])
+                if phrase not in seen_seeds and self.is_valid_bip39(phrase):
+                    results.append(("SEED", phrase))
+                    seen_seeds.add(phrase)
+                    seeds_12 += 1
+            logger.info(f"✅ Seeds de 12 palavras encontradas: {seeds_12}")
+
+            # Depois sequências de 24
+            logger.info("🔎 Buscando seeds de 24 palavras...")
+            seeds_24 = 0
+            for i in range(total_bip39 - 24 + 1):
+                if i > 0 and i % 10000 == 0:
+                    logger.info(f"   Progresso: {i} / {total_bip39 - 24 + 1} | Seeds encontradas: {seeds_24}")
+                phrase = " ".join(bip39_words[i : i + 24])
+                if phrase not in seen_seeds and self.is_valid_bip39(phrase):
+                    results.append(("SEED", phrase))
+                    seen_seeds.add(phrase)
+                    seeds_24 += 1
+            logger.info(f"✅ Seeds de 24 palavras encontradas: {seeds_24}")
+            logger.info(f"✅ Total de seeds BIP39 encontradas: {seeds_12 + seeds_24}")
+
+        # Remover duplicatas de todos os tipos usando set O(1)
+        seen: set = set()
         unique_results = []
         for t, v in results:
             if v not in seen:
                 unique_results.append((t, v))
                 seen.add(v)
-        
+
+        # Estatísticas finais por tipo
+        type_counts: dict = {}
+        for t, _ in unique_results:
+            type_counts[t] = type_counts.get(t, 0) + 1
+
+        logger.info(f"📈 Total de itens únicos extraídos: {len(unique_results)}")
+        for item_type in ["SEED", "ADDR_ETH", "ADDR_BTC", "ADDR_TRON", "ADDR_SOL", "KEY_SOL", "KEY_HEX"]:
+            logger.info(f"   - {item_type}: {type_counts.get(item_type, 0)}")
+
         return unique_results
