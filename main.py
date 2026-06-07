@@ -40,14 +40,14 @@ def format_seed_display(item_type: str, value: str) -> str:
             preview = " ".join(words[:3]) + " ... " + " ".join(words[-3:])
         else:
             preview = value
-        return f"SEED (Hash: {sha256_hash})\n'{preview}'"
+        return f"SEED (Hash: {sha256_hash})\n{preview}"
 
     if item_type in ("KEY_SOL", "KEY_HEX"):
         truncated = value[:10] + "..." + value[-10:] if len(value) > 20 else value
-        return f"{item_type}\n'{truncated}'"
+        return f"{item_type}\n{truncated}"
 
     # Endereços diretos — exibir completo
-    return f"{item_type}\n'{value}'"
+    return f"{item_type}\n{value}"
 
 
 def format_found_message(item_type: str, value: str, balances: list) -> str:
@@ -62,9 +62,9 @@ def format_found_message(item_type: str, value: str, balances: list) -> str:
     )
 
     msg = (
-        f"🎯 **SALDO ENCONTRADO\\!**\n"
+        f"🎯 SALDO ENCONTRADO!\n"
         f"{seed_line}\n\n"
-        f"💰 **Saldos:**\n"
+        f"💰 Saldos:\n"
         f"{balance_lines}"
     )
 
@@ -113,8 +113,9 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             if res:
                 found_count += 1
                 v, balances = res
+                logger.info(f"Saldo encontrado! Tipo: {item_type} | Saldos: {balances}")
                 msg = format_found_message(item_type, v, balances)
-                await update.message.reply_text(msg, parse_mode="Markdown")
+                await update.message.reply_text(msg)
         except Exception as e:
             logger.error(f"Erro ao verificar item {i+1} ({item_type}): {e}")
 
