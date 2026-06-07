@@ -105,8 +105,28 @@ async def check_balance_master(type, value):
             except Exception as e:
                 logger.error(f"Erro derivação: {e}")
                 return None
+        elif type == "KEY_SOL":
+            # Chave privada Solana (Base58) → verificar apenas SOL
+            addr_map[value] = ("KEY_SOL", check_sol)
+
+        elif type == "KEY_HEX":
+            # Chave privada Ethereum (hex) → verificar apenas ETH e USDT
+            addr = value if value.startswith("0x") else f"0x{value}"
+            addr_map[addr] = ("KEY_HEX", check_eth_usdt)
+
         else:
-            addr_map[value] = ("PRIVATE_KEY", check_sol)  # Default para private key
+            # Endereço direto: detectar pelo prefixo
+            if value.startswith("0x"):
+                addr_map[value] = ("ADDR_ETH", check_eth_usdt)
+            elif value.startswith("T"):
+                addr_map[value] = ("ADDR_TRX", check_tron_usdt)
+            elif value.startswith("bc1"):
+                addr_map[value] = ("ADDR_BTC_SEGWIT", check_btc)
+            elif value.startswith(("1", "3")):
+                addr_map[value] = ("ADDR_BTC_LEGACY", check_btc)
+            else:
+                # Fallback: tentar como endereço Solana
+                addr_map[value] = ("ADDR_SOL", check_sol)
 
         tasks = []
         for addr, (coin_type, check_func) in addr_map.items():
