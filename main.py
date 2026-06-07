@@ -1,4 +1,5 @@
 import os
+import hashlib
 import logging
 import asyncio
 import tempfile
@@ -20,6 +21,57 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "8422682029"))
 
 extractor = SeedExtractor()
 user_pools = {}
+
+TELEGRAM_MAX_CHARS = 4096
+
+
+def format_seed_display(item_type: str, value: str) -> str:
+    """
+    Formata a exibição de seeds/chaves/endereços de forma segura e compacta.
+
+    - SEED: SHA256 (primeiros 16 chars) + primeiras 3 palavras + últimas 3 palavras
+    - KEY_SOL / KEY_HEX: primeiros 10 + últimos 10 caracteres
+    - Endereços diretos: valor completo
+    """
+    if item_type == "SEED":
+        sha256_hash = hashlib.sha256(value.encode()).hexdigest()[:16]
+        words = value.split()
+        if len(words) > 6:
+            preview = " ".join(words[:3]) + " ... " + " ".join(words[-3:])
+        else:
+            preview = value
+        return f"SEED (Hash: {sha256_hash})\n'{preview}'"
+
+    if item_type in ("KEY_SOL", "KEY_HEX"):
+        truncated = value[:10] + "..." + value[-10:] if len(value) > 20 else value
+        return f"{item_type}\n'{truncated}'"
+
+    # Endereços diretos — exibir completo
+    return f"{item_type}\n'{value}'"
+
+
+def format_found_message(item_type: str, value: str, balances: list) -> str:
+    """
+    Monta a mensagem de saldo encontrado com estrutura clara e emojis.
+    Garante que o resultado não ultrapasse TELEGRAM_MAX_CHARS.
+    """
+    seed_line = format_seed_display(item_type, value)
+
+    balance_lines = "\n".join(
+        f"• {coin}: {bal}" for coin, _addr, bal in balances
+    )
+
+    msg = (
+        f"🎯 **SALDO ENCONTRADO\\!**\n"
+        f"{seed_line}\n\n"
+        f"💰 **Saldos:**\n"
+        f"{balance_lines}"
+    )
+
+    if len(msg) > TELEGRAM_MAX_CHARS:
+        msg = msg[: TELEGRAM_MAX_CHARS - 3] + "..."
+
+    return msg
 
 async def is_authorized(update: Update) -> bool:
     if not update or not update.effective_user: return False
@@ -61,10 +113,11 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             if res:
                 found_count += 1
                 v, balances = res
-                msg = f"🎯 **SALDO!** ({item_type})\n`{v}`\n"
-                for c, a, b in balances: msg += f"• {c}: {b}\n"
-                await update.message.reply_text(msg)
-        except: pass
+                msg = format_found_message(item_type, v, balances)
+                await update.message.reply_text(msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Erro ao verificar item {i+1} ({item_type}): {e}")
+
         
         if (i + 1) % 10 == 0:
             try: await status_msg.edit_text(f"🔍 Progresso: {i+1}/{len(items)} | 🎯 Achados: {found_count}")
