@@ -65,18 +65,16 @@ class SeedExtractor:
         bip39_words = [w for w in all_words if w in self.wordlist]
         
         if len(bip39_words) >= 12:
-            # Focamos em 12 e 24 palavras para performance em arquivos gigantes
-            # Limitamos a busca para os primeiros 10.000 termos BIP39 encontrados
-            max_search = min(len(bip39_words), 10000)
-            
+            # Sem limite - busca EXAUSTIVA em TODAS as palavras
+
             # Buscamos primeiro sequências de 12 (mais comum)
-            for i in range(max_search - 12 + 1):
+            for i in range(len(bip39_words) - 12 + 1):
                 phrase = " ".join(bip39_words[i : i + 12])
                 if self.is_valid_bip39(phrase):
                     results.append(("SEED", phrase))
             
             # Depois sequências de 24
-            for i in range(max_search - 24 + 1):
+            for i in range(len(bip39_words) - 24 + 1):
                 phrase = " ".join(bip39_words[i : i + 24])
                 if self.is_valid_bip39(phrase):
                     results.append(("SEED", phrase))
