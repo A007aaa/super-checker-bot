@@ -169,8 +169,8 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as e:
             logger.error(f"Erro ao verificar item {i+1}/{total_items} ({item_type}): {e}")
 
-        # Adiciona um pequeno delay para evitar flood
-        await asyncio.sleep(0.05)
+        # Adiciona um delay maior para evitar flood (0.2s = 5 req/s max)
+        await asyncio.sleep(0.2)
 
         if (i + 1) % 50 == 0: # Aumentado para 50 para reduzir drasticamente as edições
             logger.info(f"📊 Progresso: {i+1}/{total_items} | 🎯 Achados: {found_count}")
@@ -179,7 +179,7 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
 
     logger.info(f"✅ Varredura concluída — {total_items} itens verificados | {found_count} saldos encontrados")
-    await update.message.reply_text(
+    await safe_send_message(update,
         f"✅ Concluído!\n"
         f"📦 Itens verificados: {total_items}\n"
         f"🎯 Saldos encontrados: {found_count}"
