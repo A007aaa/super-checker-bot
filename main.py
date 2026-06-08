@@ -90,18 +90,42 @@ async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user_pools[update.effective_user.id] = []
     await update.message.reply_text("🗑️ Memória limpa.")
 
+import telegram.error
+
+async def safe_send_message(update: Update, text: str):
+    """Envia mensagem com tratamento de Flood Control."""
+    try:
+        return await update.message.reply_text(text)
+    except telegram.error.RetryAfter as e:
+        logger.warning(f"Flood control atingido. Aguardando {e.retry_after} segundos...")
+        await asyncio.sleep(e.retry_after)
+        return await update.message.reply_text(text)
+    except Exception as e:
+        logger.error(f"Erro ao enviar mensagem: {e}")
+
+async def safe_edit_message(message, text: str):
+    """Edita mensagem com tratamento de Flood Control."""
+    try:
+        return await message.edit_text(text)
+    except telegram.error.RetryAfter as e:
+        logger.warning(f"Flood control atingido na edição. Aguardando {e.retry_after} segundos...")
+        await asyncio.sleep(e.retry_after)
+        return await message.edit_text(text)
+    except Exception as e:
+        logger.error(f"Erro ao editar mensagem: {e}")
+
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update): return
     user_id = update.effective_user.id
     pool = user_pools.get(user_id, [])
     if not pool:
-        await update.message.reply_text("❌ Nada para verificar.")
+        await safe_send_message(update, "❌ Nada para verificar.")
         return
 
     full_text = " ".join(pool)
     total_chars = len(full_text)
     logger.info(f"🔍 Iniciando extração — texto com {total_chars} caracteres")
-    status_msg = await update.message.reply_text(
+    status_msg = await safe_send_message(update, 
         f"🔍 Extraindo itens do texto acumulado ({total_chars} caracteres)... Aguarde."
     )
     
@@ -110,12 +134,12 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     
     if not items:
         logger.info("❌ Nenhum item encontrado após extração")
-        await status_msg.edit_text("❌ Nenhuma Seed/Key encontrada.")
+        await safe_edit_message(status_msg, "❌ Nenhuma Seed/Key encontrada.")
         return
 
     total_items = len(items)
     logger.info(f"✅ Extração concluída — {total_items} itens únicos encontrados. Iniciando varredura de saldos...")
-    await status_msg.edit_text(
+    await safe_edit_message(status_msg,
         f"✅ Extração concluída!\n"
         f"📦 {total_items} itens únicos encontrados.\n"
         f"💰 Iniciando varredura de saldos..."
@@ -134,17 +158,18 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     f"| Redes: {len(balances)} | {balance_summary}"
                 )
                 msg = format_found_message(item_type, v, balances)
-                await update.message.reply_text(msg)
+                await safe_send_message(update, msg)
         except Exception as e:
             logger.error(f"Erro ao verificar item {i+1}/{total_items} ({item_type}): {e}")
 
-        if (i + 1) % 10 == 0:
+        # Adiciona um pequeno delay para evitar flood
+        await asyncio.sleep(0.05)
+
+        if (i + 1) % 20 == 0: # Aumentado para 20 para reduzir edições de status
             logger.info(f"📊 Progresso: {i+1}/{total_items} | 🎯 Achados: {found_count}")
-            try:
-                await status_msg.edit_text(
-                    f"🔍 Progresso: {i+1}/{total_items} | 🎯 Achados: {found_count}"
-                )
-            except: pass
+            await safe_edit_message(status_msg,
+                f"🔍 Progresso: {i+1}/{total_items} | 🎯 Achados: {found_count}"
+            )
 
     logger.info(f"✅ Varredura concluída — {total_items} itens verificados | {found_count} saldos encontrados")
     await update.message.reply_text(
@@ -160,7 +185,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = ""
 
     if update.message.document:
-        status = await update.message.reply_text("⏳ Lendo arquivo... Isso pode levar alguns segundos.")
+        status = await safe_send_message(update, "⏳ Lendo arquivo... Isso pode levar alguns segundos.")
         try:
             file = await context.bot.get_file(update.message.document.file_id)
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -168,13 +193,13 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 with open(tmp.name, 'r', encoding='utf-8', errors='ignore') as f:
                     text = f.read()
             os.unlink(tmp.name)
-            await status.edit_text(f"✅ Arquivo de {len(text)} caracteres lido com sucesso. Use /check para processar.")
+            await safe_edit_message(status, f"✅ Arquivo de {len(text)} caracteres lido com sucesso. Use /check para processar.")
         except Exception as e:
-            await status.edit_text(f"❌ Erro ao ler arquivo: {e}")
+            await safe_edit_message(status, f"❌ Erro ao ler arquivo: {e}")
             return
     elif update.message.text:
         text = update.message.text
-        await update.message.reply_text("📥 Texto adicionado. Use /check")
+        await safe_send_message(update, "📥 Texto adicionado. Use /check")
 
     if text.strip():
         if user_id not in user_pools: user_pools[user_id] = []
