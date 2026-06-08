@@ -169,10 +169,7 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as e:
             logger.error(f"Erro ao verificar item {i+1}/{total_items} ({item_type}): {e}")
 
-        # Adiciona um pequeno delay para evitar flood
-        await asyncio.sleep(0.05)
-
-        if (i + 1) % 50 == 0: # Aumentado para 50 para reduzir drasticamente as edições
+        if (i + 1) % 10 == 0:
             logger.info(f"📊 Progresso: {i+1}/{total_items} | 🎯 Achados: {found_count}")
             await safe_edit_message(status_msg,
                 f"🔍 Progresso: {i+1}/{total_items} | 🎯 Achados: {found_count}"
