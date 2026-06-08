@@ -104,15 +104,22 @@ async def safe_send_message(update: Update, text: str):
         logger.error(f"Erro ao enviar mensagem: {e}")
 
 async def safe_edit_message(message, text: str):
-    """Edita mensagem com tratamento de Flood Control."""
+    """Edita mensagem com tratamento de Flood Control agressivo."""
     try:
         return await message.edit_text(text)
     except telegram.error.RetryAfter as e:
-        logger.warning(f"Flood control atingido na edição. Aguardando {e.retry_after} segundos...")
+        # Se o tempo for muito longo (ex: > 60s), não travamos o bot, apenas logamos
+        if e.retry_after > 60:
+            logger.error(f"Flood control excessivo ({e.retry_after}s). Pulando edição de status.")
+            return message
+        logger.warning(f"Flood control na edição. Aguardando {e.retry_after}s...")
         await asyncio.sleep(e.retry_after)
-        return await message.edit_text(text)
+        try:
+            return await message.edit_text(text)
+        except: return message
     except Exception as e:
         logger.error(f"Erro ao editar mensagem: {e}")
+        return message
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update): return
@@ -165,7 +172,7 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # Adiciona um pequeno delay para evitar flood
         await asyncio.sleep(0.05)
 
-        if (i + 1) % 20 == 0: # Aumentado para 20 para reduzir edições de status
+        if (i + 1) % 50 == 0: # Aumentado para 50 para reduzir drasticamente as edições
             logger.info(f"📊 Progresso: {i+1}/{total_items} | 🎯 Achados: {found_count}")
             await safe_edit_message(status_msg,
                 f"🔍 Progresso: {i+1}/{total_items} | 🎯 Achados: {found_count}"
