@@ -71,8 +71,11 @@ class SeedExtractor:
         logger.info(f"📊 Total de palavras BIP39 encontradas: {total_bip39}")
 
         if total_bip39 >= 12:
-            # Set de seeds já encontradas para deduplicação O(1)
-            seen_seeds: set = set()
+            # Dict de seeds encontradas: {seed: quantidade_de_palavras}
+            # Permite saber o tamanho de cada seed para preferir a versão de
+            # 24 palavras quando uma seed de 12 palavras estiver contida
+            # (como prefixo) dentro de uma seed de 24 palavras válida.
+            found_seeds: dict = {}
 
             # Buscamos primeiro sequências de 12 (mais comum)
             logger.info("🔎 Buscando seeds de 12 palavras...")
@@ -81,9 +84,8 @@ class SeedExtractor:
                 if i > 0 and i % 10000 == 0:
                     logger.info(f"   Progresso: {i} / {total_bip39 - 12 + 1} | Seeds encontradas: {seeds_12}")
                 phrase = " ".join(bip39_words[i : i + 12])
-                if phrase not in seen_seeds and self.is_valid_bip39(phrase):
-                    results.append(("SEED", phrase))
-                    seen_seeds.add(phrase)
+                if phrase not in found_seeds and self.is_valid_bip39(phrase):
+                    found_seeds[phrase] = 12
                     seeds_12 += 1
             logger.info(f"✅ Seeds de 12 palavras encontradas: {seeds_12}")
 
@@ -94,12 +96,25 @@ class SeedExtractor:
                 if i > 0 and i % 10000 == 0:
                     logger.info(f"   Progresso: {i} / {total_bip39 - 24 + 1} | Seeds encontradas: {seeds_24}")
                 phrase = " ".join(bip39_words[i : i + 24])
-                if phrase not in seen_seeds and self.is_valid_bip39(phrase):
-                    results.append(("SEED", phrase))
-                    seen_seeds.add(phrase)
+                if phrase in found_seeds:
+                    continue
+                if self.is_valid_bip39(phrase):
+                    # Se a seed de 12 palavras que abre esta frase de 24 já foi
+                    # encontrada, ela está contida (como prefixo) na de 24 —
+                    # removemos a de 12 e mantemos apenas a de 24 (mais completa).
+                    seed_12_prefix = " ".join(bip39_words[i : i + 12])
+                    if found_seeds.get(seed_12_prefix) == 12:
+                        del found_seeds[seed_12_prefix]
+                        seeds_12 -= 1
+                        logger.info(f"   ↪️ Seed de 12 palavras substituída pela de 24 (sobreposição detectada)")
+
+                    found_seeds[phrase] = 24
                     seeds_24 += 1
             logger.info(f"✅ Seeds de 24 palavras encontradas: {seeds_24}")
-            logger.info(f"✅ Total de seeds BIP39 encontradas: {seeds_12 + seeds_24}")
+            logger.info(f"✅ Total de seeds BIP39 encontradas (sem duplicatas/sobreposições): {len(found_seeds)}")
+
+            for seed in found_seeds:
+                results.append(("SEED", seed))
 
         # Remover duplicatas de todos os tipos usando set O(1)
         seen: set = set()
