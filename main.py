@@ -15,7 +15,7 @@ except ImportError:
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from blockchain_checker import check_balance_master, preview_addresses
+from blockchain_checker import check_balance_master, preview_addresses, check_seeds_bulk
 from tools.seed_extractor import SeedExtractor
 import storage
 import telegram.error
@@ -29,28 +29,30 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError(
-        "TELEGRAM_BOT_TOKEN não definido. Configure a variável de ambiente."
-    )
+    raise RuntimeError("TELEGRAM_BOT_TOKEN não definido.")
 
 _allowed_raw = os.getenv("ALLOWED_USER_ID", "0").strip() or "0"
 try:
     ALLOWED_USER_ID = int(_allowed_raw)
 except ValueError:
     ALLOWED_USER_ID = 0
-    logger.warning("ALLOWED_USER_ID inválido; usando 0 (sem restrição)")
 
 try:
     storage.init_db()
 except Exception as e:
-    logger.error(f"Failed to initialize storage: {e}")
+    logger.error(f"storage init: {e}")
 
 user_pools: dict[int, list[str]] = {}
-# evita dois /check simultâneos no mesmo usuário
 _running_checks: set[int] = set()
 
 TELEGRAM_MAX_CHARS = 4096
-SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "10")))
+# quantas seeds processar em paralelo dentro de um lote
+SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "25")))
+# tamanho do lote (pedido: 500)
+BATCH_SIZE = max(1, int(os.getenv("BATCH_SIZE", "500"))
+)
+# limite Telegram bot API ~20MB; alertamos acima disso
+MAX_FILE_CHARS = int(os.getenv("MAX_FILE_CHARS", str(15_000_000)))
 
 RAILWAY_DOMAIN = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip(";")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"telegram/{secrets.token_hex(8)}")
@@ -59,11 +61,11 @@ PORT = int(os.getenv("PORT", "8080"))
 NETWORK_LABELS = {
     "BTC": "Bitcoin (BTC)",
     "ETH": "Ethereum (ETH)",
-    "USDT_ETH": "Tether USDT (Ethereum ERC-20)",
+    "USDT_ETH": "USDT (Ethereum ERC-20)",
     "SOL": "Solana (SOL)",
     "TRX": "Tron (TRX)",
-    "USDT_TRX": "Tether USDT (Tron TRC-20)",
-    "USDC_TRX": "USD Coin (Tron TRC-20)",
+    "USDT_TRX": "USDT (Tron TRC-20)",
+    "USDC_TRX": "USDC (Tron TRC-20)",
 }
 
 TEST_SEED = (
@@ -72,32 +74,25 @@ TEST_SEED = (
 )
 
 
-def format_seed_display(item_type: str, value: str, show_full: bool = False) -> str:
-    if item_type == "SEED":
-        if show_full:
-            return f"SEED:\n{value}"
-        sha256_hash = hashlib.sha256(value.encode()).hexdigest()[:16]
-        words = value.split()
-        if len(words) > 6:
-            preview = " ".join(words[:3]) + " ... " + " ".join(words[-3:])
-        else:
-            preview = value
-        return f"SEED (Hash: {sha256_hash})\n{preview}"
-    return f"{item_type}\n{value}"
+def format_seed_display(value: str) -> str:
+    h = hashlib.sha256(value.encode()).hexdigest()[:16]
+    words = value.split()
+    if len(words) > 6:
+        preview = " ".join(words[:3]) + " ... " + " ".join(words[-3:])
+    else:
+        preview = value
+    return f"SEED (Hash: {h})\n{preview}"
 
 
-def format_found_message(item_type: str, value: str, balances: list) -> str:
-    seed_line = format_seed_display(item_type, value, show_full=False)
+def format_found_message(value: str, balances: list) -> str:
     lines = []
     for coin, addr, bal in balances:
         label = NETWORK_LABELS.get(coin, coin)
-        lines.append(f"• {label}\n  Saldo: {bal}\n  Endereço: `{addr}`")
-    balance_block = "\n\n".join(lines)
+        lines.append(f"• {label}\n  Saldo: {bal}\n  `{addr}`")
     msg = (
         f"🎯 SALDO ENCONTRADO!\n\n"
-        f"{seed_line}\n\n"
-        f"💰 Redes com saldo:\n\n"
-        f"{balance_block}"
+        f"{format_seed_display(value)}\n\n"
+        f"💰 Redes:\n\n" + "\n\n".join(lines)
     )
     if len(msg) > TELEGRAM_MAX_CHARS:
         msg = msg[: TELEGRAM_MAX_CHARS - 3] + "..."
@@ -112,29 +107,21 @@ async def is_authorized(update: Update) -> bool:
     return update.effective_user.id == ALLOWED_USER_ID
 
 
-async def safe_send_message(
-    update: Update | None,
-    text: str,
-    context: ContextTypes.DEFAULT_TYPE | None = None,
-    chat_id: int | None = None,
-):
+async def safe_send(context, chat_id: int, text: str):
     try:
-        if update and getattr(update, "message", None):
-            return await update.message.reply_text(text)
-        cid = chat_id
-        if cid is None and update and getattr(update, "effective_chat", None):
-            cid = update.effective_chat.id
-        if context and cid is not None:
-            return await context.bot.send_message(chat_id=cid, text=text)
+        return await context.bot.send_message(chat_id=chat_id, text=text)
     except telegram.error.RetryAfter as e:
         await asyncio.sleep(e.retry_after)
-        return await safe_send_message(update, text, context, chat_id)
+        try:
+            return await context.bot.send_message(chat_id=chat_id, text=text)
+        except Exception:
+            return None
     except Exception as e:
-        logger.exception(f"Erro ao enviar mensagem: {e}")
-    return None
+        logger.exception(f"send: {e}")
+        return None
 
 
-async def safe_edit_message(message, text: str):
+async def safe_edit(message, text: str):
     if message is None:
         return None
     try:
@@ -154,15 +141,16 @@ async def safe_edit_message(message, text: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
         return
-    await safe_send_message(
-        update,
-        "🚀 Super Checker Bot pronto!\n\n"
-        "1) Envie texto ou .txt\n"
-        "2) Use /check\n\n"
-        "Prioridade: TRON (TRX + TRC-20 USDT)\n"
-        "Também: BTC · ETH · SOL\n"
-        "Comandos: /start /check /clear /test",
+    await safe_send(
         context,
+        update.effective_chat.id,
+        "🚀 Super Checker Bot — modo bulk\n\n"
+        "• Arquivos .txt grandes OK\n"
+        f"• Lotes de até {BATCH_SIZE} seeds\n"
+        f"• {SEED_WORKERS} workers em paralelo\n"
+        "• Redes: BTC · ETH · USDT-ERC20 · SOL · TRX · USDT-TRC20\n\n"
+        "Fluxo: envie texto/.txt → /check\n"
+        "Comandos: /start /check /clear /test",
     )
 
 
@@ -170,58 +158,45 @@ async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not await is_authorized(update):
         return
     user_pools[update.effective_user.id] = []
-    await safe_send_message(update, "🗑️ Memória limpa.", context)
+    await safe_send(context, update.effective_chat.id, "🗑️ Memória limpa.")
 
 
 async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
         return
-    status = await safe_send_message(
-        update, "🧪 Testando checker (seed pública BIP39)...", context
-    )
+    chat_id = update.effective_chat.id
+    status = await safe_send(context, chat_id, "🧪 Testando todas as redes...")
     try:
         res = await check_balance_master("SEED", TEST_SEED)
         if res:
             _v, balances = res
-            await safe_edit_message(
-                status,
-                "✅ Checker OK!\n\n"
-                + format_found_message("SEED", TEST_SEED, balances),
+            await safe_edit(
+                status, "✅ Checker OK!\n\n" + format_found_message(TEST_SEED, balances)
             )
         else:
-            await safe_edit_message(
-                status, "⚠️ Checker rodou sem saldo na seed de teste (RPC?)."
-            )
+            await safe_edit(status, "⚠️ Sem saldo na seed de teste (RPC?).")
     except Exception as e:
-        logger.exception("test_cmd failed")
-        await safe_edit_message(status, f"❌ Erro no teste: {e}")
+        logger.exception("test failed")
+        await safe_edit(status, f"❌ {e}")
 
 
-async def _run_check_job(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    user_id: int,
-    full_text: str,
-    status_msg,
-):
-    """Trabalho pesado fora do handler do webhook (evita timeout do Telegram)."""
+async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, status_msg):
     try:
+        await safe_edit(status_msg, "🔍 Extraindo seeds BIP39 do texto/arquivo...")
         extractor = SeedExtractor()
         stats = await asyncio.to_thread(extractor.extract_with_stats, full_text)
         seeds = stats.valid
 
         if not seeds:
-            fail_n = len(stats.failed_checksum)
             extra = ""
-            if fail_n:
+            if stats.failed_checksum:
                 sample = stats.failed_checksum[0].split()
-                preview = " ".join(sample[:3]) + " ... " + " ".join(sample[-3:])
+                prev = " ".join(sample[:3]) + " ... " + " ".join(sample[-3:])
                 extra = (
-                    f"\n\n⚠️ {fail_n} frase(s) com palavras BIP39 mas checksum INVÁLIDO.\n"
-                    f"Ex.: {preview}\n"
-                    f"Não é seed BIP39 válida (palavra errada / Electrum / outra wordlist)."
+                    f"\n\n⚠️ {len(stats.failed_checksum)} frases com checksum inválido\n"
+                    f"Ex.: {prev}"
                 )
-            await safe_edit_message(
+            await safe_edit(
                 status_msg,
                 f"⚠️ Nenhuma seed BIP39 válida.\n"
                 f"Palavras: {stats.total_words} | Janelas: {stats.windows_scanned}"
@@ -230,94 +205,96 @@ async def _run_check_job(
             return
 
         total = len(seeds)
-        diag = f"✅ {total} seed(s) BIP39 válida(s)"
-        if stats.failed_checksum:
-            diag += f"\n⚠️ {len(stats.failed_checksum)} checksum inválido (ignoradas)"
-        await safe_edit_message(
+        n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+        await safe_edit(
             status_msg,
-            diag + "\n🔄 Checando TRON/TRC-20 prioritário (em background)...",
+            f"✅ {total} seed(s) BIP39 válida(s)\n"
+            f"📦 {n_batches} lote(s) de até {BATCH_SIZE}\n"
+            f"⚙️ {SEED_WORKERS} workers | redes: BTC ETH SOL TRX\n"
+            f"🔄 Iniciando...",
         )
 
-        sem = asyncio.Semaphore(SEED_WORKERS)
         found_count = 0
         zero_count = 0
         error_count = 0
         checked = 0
         zero_samples: list[str] = []
-        lock = asyncio.Lock()
 
-        async def process_one(seed: str):
-            nonlocal found_count, zero_count, error_count, checked
-            async with sem:
-                try:
-                    res = await check_balance_master("SEED", seed)
-                    if res:
-                        v, balances = res
-                        msg = format_found_message("SEED", v, balances)
-                        await context.bot.send_message(chat_id=chat_id, text=msg)
+        for batch_i in range(n_batches):
+            start = batch_i * BATCH_SIZE
+            batch = seeds[start : start + BATCH_SIZE]
+            await safe_edit(
+                status_msg,
+                f"📦 Lote {batch_i + 1}/{n_batches} "
+                f"({len(batch)} seeds)\n"
+                f"⏳ Total: {checked}/{total} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}",
+            )
+
+            async for seed, res, err in check_seeds_bulk(batch, workers=SEED_WORKERS):
+                checked += 1
+                if err is not None:
+                    error_count += 1
+                elif res:
+                    _v, balances = res
+                    found_count += 1
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=format_found_message(_v, balances),
+                        )
+                    except telegram.error.RetryAfter as e:
+                        await asyncio.sleep(e.retry_after)
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=format_found_message(_v, balances),
+                        )
+                    except Exception:
+                        logger.exception("falha ao notificar saldo")
+                    try:
+                        storage.mark_alerted("SEED", _v)
+                    except Exception:
+                        pass
+                else:
+                    zero_count += 1
+                    if len(zero_samples) < 5:
                         try:
-                            storage.mark_alerted("SEED", v)
+                            addrs = preview_addresses(seed)
+                            w = seed.split()
+                            prev = " ".join(w[:2]) + "…" + " ".join(w[-2:])
+                            zero_samples.append(
+                                f"• {prev}\n  TRX `{addrs.get('trx', '?')}`"
+                            )
                         except Exception:
                             pass
-                        async with lock:
-                            found_count += 1
-                    else:
-                        async with lock:
-                            zero_count += 1
-                            if len(zero_samples) < 5:
-                                try:
-                                    addrs = preview_addresses(seed)
-                                    words = seed.split()
-                                    prev = (
-                                        " ".join(words[:2])
-                                        + "…"
-                                        + " ".join(words[-2:])
-                                    )
-                                    zero_samples.append(
-                                        f"• {prev}\n"
-                                        f"  TRX `{addrs.get('trx', '?')}`\n"
-                                        f"  ETH `{addrs.get('eth', '?')}`"
-                                    )
-                                except Exception:
-                                    pass
-                except Exception as e:
-                    logger.exception(f"Erro seed: {e}")
-                    async with lock:
-                        error_count += 1
-                finally:
-                    async with lock:
-                        checked += 1
-                        if checked % 3 == 0 or checked == total:
-                            await safe_edit_message(
-                                status_msg,
-                                f"⏳ {checked}/{total} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}",
-                            )
 
-        await asyncio.gather(*(process_one(s) for s in seeds))
+                if checked % 10 == 0 or checked == total:
+                    await safe_edit(
+                        status_msg,
+                        f"📦 Lote {batch_i + 1}/{n_batches}\n"
+                        f"⏳ {checked}/{total} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}",
+                    )
 
         summary = (
             f"✅ Concluído\n"
-            f"• Seeds BIP39 válidas: {total}\n"
+            f"• Seeds BIP39: {total}\n"
+            f"• Lotes: {n_batches} × até {BATCH_SIZE}\n"
             f"• Com saldo: {found_count}\n"
-            f"• Sem saldo (path padrão): {zero_count}\n"
-            f"• Erros: {error_count}"
+            f"• Sem saldo: {zero_count}\n"
+            f"• Erros: {error_count}\n\n"
+            f"Redes: BTC · ETH+USDT · SOL · TRX+TRC20"
         )
-        if zero_samples:
+        if zero_samples and found_count == 0:
             summary += (
-                "\n\n🔎 TRX path0 das seeds sem saldo:\n"
+                "\n\n🔎 Amostra TRX path0 (sem saldo):\n"
                 + "\n".join(zero_samples)
-                + "\n\nAbra o TRX no tronscan.org e compare com a carteira.\n"
-                "Se for outro endereço = path/passphrase diferente."
+                + "\n\nSe o endereço no Tronscan for outro → path/passphrase diferente."
             )
-        await safe_edit_message(status_msg, summary)
+        await safe_edit(status_msg, summary)
+        await safe_send(context, chat_id, summary)
+
     except Exception:
-        logger.exception("_run_check_job failed")
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id, text="❌ Erro interno durante o check. Veja os logs."
-            )
-        except Exception:
-            pass
+        logger.exception("job failed")
+        await safe_send(context, chat_id, "❌ Erro interno no check. Veja logs no Railway.")
     finally:
         _running_checks.discard(user_id)
 
@@ -330,31 +307,29 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     chat_id = update.effective_chat.id
 
     if user_id in _running_checks:
-        await safe_send_message(
-            update, "⏳ Já existe um /check em andamento. Aguarde terminar.", context
+        await safe_send(
+            context, chat_id, "⏳ Já há um /check em andamento. Aguarde terminar."
         )
         return
 
     pool = user_pools.get(user_id, [])
     if not pool:
-        await safe_send_message(
-            update, "❌ Nada para verificar. Envie texto ou .txt primeiro.", context
+        await safe_send(
+            context, chat_id, "❌ Nada na memória. Envie texto ou .txt e use /check."
         )
         return
 
-    full_text = " ".join(pool)
-    # limpa pool já — job usa a cópia full_text
+    full_text = "\n".join(pool)
     user_pools[user_id] = []
 
-    status_msg = await safe_send_message(
-        update,
-        f"🔍 Recebido ({len(full_text)} caracteres).\n"
-        f"Processando em background (webhook não trava)...",
+    status_msg = await safe_send(
         context,
+        chat_id,
+        f"📥 Recebido: {len(full_text):,} caracteres\n"
+        f"Background job iniciado (webhook liberado)...",
     )
 
     _running_checks.add(user_id)
-    # importa: não await — libera o webhook imediatamente
     context.application.create_task(
         _run_check_job(context, chat_id, user_id, full_text, status_msg)
     )
@@ -367,12 +342,20 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     text = ""
 
     if update.message.document:
-        status = await safe_send_message(update, "⏳ Lendo arquivo...", context)
+        doc = update.message.document
+        status = await safe_send(context, chat_id, "⏳ Baixando arquivo...")
         try:
-            file = await context.bot.get_file(update.message.document.file_id)
+            if doc.file_size and doc.file_size > 20 * 1024 * 1024:
+                await safe_edit(
+                    status,
+                    "❌ Arquivo > 20MB (limite do Telegram Bot API). Divida o .txt.",
+                )
+                return
+            file = await context.bot.get_file(doc.file_id)
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
                 await file.download_to_drive(tmp.name)
                 with open(tmp.name, "r", encoding="utf-8", errors="ignore") as f:
@@ -381,15 +364,24 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 os.unlink(tmp.name)
             except OSError:
                 pass
-            await safe_edit_message(
-                status, f"✅ Arquivo de {len(text)} caracteres. Use /check"
-            )
+            if len(text) > MAX_FILE_CHARS:
+                await safe_edit(
+                    status,
+                    f"⚠️ Arquivo muito grande ({len(text):,} chars). "
+                    f"Usando os primeiros {MAX_FILE_CHARS:,}.",
+                )
+                text = text[:MAX_FILE_CHARS]
+            else:
+                await safe_edit(
+                    status,
+                    f"✅ Arquivo OK: {len(text):,} caracteres.\nUse /check",
+                )
         except Exception as e:
-            await safe_edit_message(status, f"❌ Erro ao ler arquivo: {e}")
+            await safe_edit(status, f"❌ Erro ao ler arquivo: {e}")
             return
     elif update.message.text:
         text = update.message.text
-        await safe_send_message(update, "📥 Texto adicionado. Use /check", context)
+        await safe_send(context, chat_id, "📥 Texto adicionado. Use /check")
 
     if text.strip():
         user_pools.setdefault(user_id, []).append(text)
@@ -398,9 +390,9 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err = context.error
     if isinstance(err, telegram.error.Conflict):
-        logger.error("Conflict: outra instância usa este token.")
+        logger.error("Conflict: outra instância com este token.")
         return
-    logger.exception("Exception while handling update", exc_info=err)
+    logger.exception("update error", exc_info=err)
 
 
 def build_app() -> Application:
@@ -421,10 +413,9 @@ def build_app() -> Application:
 
 def main():
     application = build_app()
-
     if RAILWAY_DOMAIN:
         webhook_url = f"https://{RAILWAY_DOMAIN}/{WEBHOOK_PATH}"
-        logger.info(f"Modo WEBHOOK: {webhook_url}")
+        logger.info(f"WEBHOOK {webhook_url} | batch={BATCH_SIZE} workers={SEED_WORKERS}")
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
@@ -434,16 +425,14 @@ def main():
             allowed_updates=Update.ALL_TYPES,
         )
     else:
-        logger.info("Modo POLLING (sem RAILWAY_PUBLIC_DOMAIN)")
+        logger.info("POLLING mode")
 
-        async def _clear_webhook(app: Application) -> None:
+        async def _clear(app: Application):
             await app.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("Webhook removido. Usando getUpdates.")
 
-        application.post_init = _clear_webhook
+        application.post_init = _clear
         application.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True, allowed_updates=Update.ALL_TYPES
         )
 
 
@@ -451,4 +440,4 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        logger.exception("Unhandled exception in main loop")
+        logger.exception("fatal")
