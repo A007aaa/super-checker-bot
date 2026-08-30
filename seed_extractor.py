@@ -1,5 +1,7 @@
 import re
 import logging
+import os
+import concurrent.futures
 from mnemonic import Mnemonic
 import base58
 
@@ -19,8 +21,9 @@ class SeedExtractor:
 
     def extract_all(self, text):
         """
-        Extrai Seeds, Keys e Endereços diretos de forma otimizada para performance.
-        Suporta até 1 milhão de seed phrases sem limite artificial.
+        Extrai Seeds, Keys e Endereços diretos de forma otimizado para performance.
+        Suporta varredura exaustiva de seeds contíguas e validação paralela para
+        melhorar recall e velocidade em textos grandes.
         """
         if not text:
             return []
@@ -60,7 +63,8 @@ class SeedExtractor:
         for key in eth_keys:
             results.append(("KEY_HEX", key))
 
-        # 5. Seeds BIP39 — detecção corrigida: garantimos contiguidade e todos os tamanhos válidos
+        # 5. Seeds BIP39 — detecção reforçada: garantimos contiguidade, todos os tamanhos válidos,
+        # e validação paralela dos candidatos para melhorar throughput em textos grandes.
         logger.info("🔍 Iniciando busca de seeds BIP39...")
         clean_text = re.sub(r'[^a-zA-Z\s]', ' ', text).lower()
         all_words = clean_text.split()
@@ -79,7 +83,7 @@ class SeedExtractor:
                 if total_words < size:
                     continue
                 logger.info(f"🔎 Buscando seeds de {size} palavras...")
-                count = 0
+                candidates = []
                 limit = total_words - size + 1
                 for i in range(limit):
                     # Pular janelas que já contenham índices marcados por uma seed maior
@@ -90,16 +94,46 @@ class SeedExtractor:
                     if not all(w in self.wordlist for w in window):
                         continue
                     phrase = " ".join(window)
-                    if phrase in found_seeds:
-                        continue
-                    if self.is_valid_bip39(phrase):
+                    candidates.append((i, phrase))
+
+                logger.info(f"   Candidatos válidos (palavras presentes no wordlist): {len(candidates)}")
+
+                # Valida candidatos em paralelo para acelerar checagem de checksum BIP39
+                if candidates:
+                    def validate(pair):
+                        idx, phrase = pair
+                        try:
+                            if self.is_valid_bip39(phrase):
+                                return (idx, phrase)
+                        except:
+                            return None
+                        return None
+
+                    max_workers = min(32, (os.cpu_count() or 1) * 5)
+                    validated = []
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                        # Map com chunks para reduzir overhead
+                        for res in ex.map(validate, candidates, chunksize=64):
+                            if res:
+                                validated.append(res)
+
+                    # Ordena validados por posição para determinismo
+                    validated.sort(key=lambda x: x[0])
+
+                    count = 0
+                    for idx, phrase in validated:
+                        # Checa novamente sobreposição (já que outras seeds validadas
+                        # podem ter marcado índices)
+                        if any(used[idx : idx + size]):
+                            continue
                         # Marca índices como usados para evitar sobreposição por seeds menores
-                        for j in range(i, i + size):
+                        for j in range(idx, idx + size):
                             used[j] = True
                         found_seeds[phrase] = size
                         count += 1
-                        logger.debug(f"   Encontrada seed de {size} palavras na posição {i}")
-                logger.info(f"✅ Seeds de {size} palavras encontradas: {count}")
+                    logger.info(f"✅ Seeds de {size} palavras encontradas: {count}")
+                else:
+                    logger.info(f"✅ Seeds de {size} palavras encontradas: 0")
 
             logger.info(f"✅ Total de seeds BIP39 encontradas (sem sobreposições): {len(found_seeds)}")
 
