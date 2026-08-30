@@ -1,4 +1,4 @@
-python-telegram-bot==22.7
+python-telegram-bot[webhooks]==22.7
 mnemonic==0.21
 bip-utils==2.9.3
 aiohttp==3.10.11
