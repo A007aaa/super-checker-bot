@@ -3,6 +3,15 @@ import hashlib
 import logging
 import asyncio
 import tempfile
+from pathlib import Path
+
+# Carrega .env se existir (local / alguns hosts)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+except ImportError:
+    pass
+
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from blockchain_checker import check_balance_master
@@ -14,17 +23,23 @@ import telegram.error
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    level=getattr(logging, LOG_LEVEL, logging.INFO)
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
 )
 logger = logging.getLogger(__name__)
 
-# Configurações do Bot — NUNCA hardcode token em produção
+# Configurações do Bot — NUNCA hardcode token
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError(
         "TELEGRAM_BOT_TOKEN não definido. Configure a variável de ambiente ou o arquivo .env"
     )
-ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
+
+_allowed_raw = os.getenv("ALLOWED_USER_ID", "0").strip() or "0"
+try:
+    ALLOWED_USER_ID = int(_allowed_raw)
+except ValueError:
+    ALLOWED_USER_ID = 0
+    logger.warning("ALLOWED_USER_ID inválido; usando 0 (sem restrição)")
 
 # initialize storage (SQLite) for persisted alerts
 try:
@@ -32,15 +47,13 @@ try:
 except Exception as e:
     logger.error(f"Failed to initialize storage: {e}")
 
-user_pools = {}
+user_pools: dict[int, list[str]] = {}
 
 TELEGRAM_MAX_CHARS = 4096
+SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "6")))
 
 
 def format_seed_display(item_type: str, value: str, show_full: bool = False) -> str:
-    """
-    Formata a exibição de seeds/chaves/endereços de forma segura e compacta.
-    """
     if item_type == "SEED":
         if show_full:
             return f"SEED:\n{value}"
@@ -56,31 +69,20 @@ def format_seed_display(item_type: str, value: str, show_full: bool = False) -> 
         truncated = value[:10] + "..." + value[-10:] if len(value) > 20 else value
         return f"{item_type}\n{truncated}"
 
-    # Endereços diretos — exibir completo
     return f"{item_type}\n{value}"
 
 
 def format_found_message(item_type: str, value: str, balances: list) -> str:
-    """
-    Monta a mensagem de saldo encontrado com estrutura clara e emojis.
-    Por segurança, não expõe a seed completa por padrão.
-    """
     seed_line = format_seed_display(item_type, value, show_full=False)
-
-    balance_lines = "\n".join(
-        f"• {coin}: {bal}" for coin, _addr, bal in balances
-    )
-
+    balance_lines = "\n".join(f"• {coin}: {bal}" for coin, _addr, bal in balances)
     msg = (
         f"🎯 SALDO ENCONTRADO!\n\n"
         f"{seed_line}\n\n"
         f"💰 Saldos encontrados:\n"
         f"{balance_lines}"
     )
-
     if len(msg) > TELEGRAM_MAX_CHARS:
         msg = msg[: TELEGRAM_MAX_CHARS - 3] + "..."
-
     return msg
 
 
@@ -88,14 +90,62 @@ async def is_authorized(update: Update) -> bool:
     if not update or not update.effective_user:
         return False
     if ALLOWED_USER_ID == 0:
-        return True  # sem restrição se não configurado
+        return True
     return update.effective_user.id == ALLOWED_USER_ID
+
+
+async def safe_send_message(
+    update: Update | None,
+    text: str,
+    context: ContextTypes.DEFAULT_TYPE | None = None,
+):
+    try:
+        if update and getattr(update, "message", None):
+            return await update.message.reply_text(text)
+        if context and update and getattr(update, "effective_chat", None):
+            return await context.bot.send_message(
+                chat_id=update.effective_chat.id, text=text
+            )
+        logger.error("safe_send_message: sem meio de enviar mensagem")
+    except telegram.error.RetryAfter as e:
+        logger.warning(f"Flood control. Aguardando {e.retry_after}s...")
+        await asyncio.sleep(e.retry_after)
+        if update and getattr(update, "message", None):
+            return await update.message.reply_text(text)
+    except Exception as e:
+        logger.exception(f"Erro ao enviar mensagem: {e}")
+    return None
+
+
+async def safe_edit_message(message, text: str):
+    if message is None:
+        return None
+    try:
+        return await message.edit_text(text)
+    except telegram.error.RetryAfter as e:
+        if e.retry_after > 60:
+            logger.error(f"Flood control excessivo ({e.retry_after}s). Pulando edição.")
+            return message
+        await asyncio.sleep(e.retry_after)
+        try:
+            return await message.edit_text(text)
+        except Exception:
+            return message
+    except Exception as e:
+        logger.exception(f"Erro ao editar mensagem: {e}")
+        return message
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
         return
-    await safe_send_message(update, "🚀 **BOT ATUALIZADO!**\nEnvie seus arquivos .txt e use /check.", context)
+    await safe_send_message(
+        update,
+        "🚀 Super Checker Bot pronto!\n"
+        "Envie texto ou arquivos .txt e use /check para verificar.\n"
+        "Comandos: /start /check /clear",
+        context,
+    )
 
 
 async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -105,161 +155,137 @@ async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await safe_send_message(update, "🗑️ Memória limpa.", context)
 
 
-async def safe_send_message(update: Update | None, text: str, context: ContextTypes.DEFAULT_TYPE | None = None):
-    """Envia mensagem com tratamento de Flood Control. Usa update.message ou context as fallback."""
-    try:
-        if update and getattr(update, "message", None):
-            return await update.message.reply_text(text)
-        if context and getattr(update, "effective_chat", None):
-            return await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
-        logger.error("safe_send_message: sem meio de enviar mensagem (update.message e context faltando)")
-    except telegram.error.RetryAfter as e:
-        logger.warning(f"Flood control atingido. Aguardando {e.retry_after} segundos...")
-        await asyncio.sleep(e.retry_after)
-        if update and getattr(update, "message", None):
-            return await update.message.reply_text(text)
-    except Exception as e:
-        logger.exception(f"Erro ao enviar mensagem: {e}")
-
-
-async def safe_edit_message(message, text: str, context: ContextTypes.DEFAULT_TYPE | None = None):
-    """Edita mensagem com tratamento de Flood Control; retorna a message (ou a original)."""
-    if message is None:
-        return None
-    try:
-        return await message.edit_text(text)
-    except telegram.error.RetryAfter as e:
-        if e.retry_after > 60:
-            logger.error(f"Flood control excessivo ({e.retry_after}s). Pulando edição de status.")
-            return message
-        logger.warning(f"Flood control na edição. Aguardando {e.retry_after}s...")
-        await asyncio.sleep(e.retry_after)
-        try:
-            return await message.edit_text(text)
-        except Exception:
-            logger.exception("Falha na segunda tentativa de edit_text")
-            return message
-    except Exception as e:
-        logger.exception(f"Erro ao editar mensagem: {e}")
-        return message
-
-
-# --- New streaming check_pool using producer(queue)/workers to avoid blocking ---
-SEED_WORKERS = int(os.getenv("SEED_WORKERS", "6"))
-
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
         return
+
     user_id = update.effective_user.id
     pool = user_pools.get(user_id, [])
     if not pool:
-        await safe_send_message(update, "❌ Nada para verificar.", context)
+        await safe_send_message(update, "❌ Nada para verificar. Envie texto ou .txt primeiro.", context)
         return
 
-    # concatenação conforme solicitado pelo usuário
     full_text = " ".join(pool)
     total_chars = len(full_text)
-    logger.info(f"🔍 Iniciando extração — texto com {total_chars} caracteres")
-    status_msg = await safe_send_message(update, f"🔍 Extraindo itens do texto acumulado ({total_chars} caracteres)... Aguarde.", context)
+    logger.info(f"🔍 Extração iniciada — {total_chars} caracteres")
+    status_msg = await safe_send_message(
+        update,
+        f"🔍 Extraindo seeds do texto ({total_chars} caracteres)...",
+        context,
+    )
 
-    # safeguard: warn if extremely large
-    MAX_CHARS = int(os.getenv("MAX_POOL_CHARS", str(20_000_000)))
-    if total_chars > MAX_CHARS:
-        await safe_edit_message(status_msg, f"⚠️ Texto muito grande ({total_chars} chars). Processo será executado, mas pode demorar. Use arquivos para eficiência.", context)
+    # Extração em thread para não bloquear o event loop
+    extractor = SeedExtractor()
+    try:
+        seeds = await asyncio.to_thread(extractor.extract_all, full_text)
+    except Exception as e:
+        logger.exception("Falha na extração de seeds")
+        await safe_edit_message(status_msg, f"❌ Erro na extração: {e}")
+        return
 
-    # prepare extractor and queue
-    queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
-    extractor = SeedExtractor()  # uses default chunk_size/overlap
-    loop = asyncio.get_running_loop()
+    if not seeds:
+        await safe_edit_message(
+            status_msg,
+            "⚠️ Nenhuma seed BIP39 válida encontrada no texto.\n"
+            "Confira se as palavras estão corretas e juntas (12/15/18/21/24 palavras).",
+        )
+        user_pools[user_id] = []
+        return
 
-    # producer runs in thread and pushes seeds to the asyncio queue
-    def producer():
-        try:
-            for seed in extractor.extract_all_iter(full_text):
-                asyncio.run_coroutine_threadsafe(queue.put(seed), loop).result()
-        finally:
-            # sentinel to signal end to workers
-            asyncio.run_coroutine_threadsafe(queue.put(None), loop).result()
+    total = len(seeds)
+    logger.info(f"✅ {total} seed(s) válida(s) extraída(s)")
+    await safe_edit_message(
+        status_msg,
+        f"✅ {total} seed(s) válida(s). Verificando saldos com {SEED_WORKERS} workers...",
+    )
 
-    prod_task = asyncio.to_thread(producer)
+    sem = asyncio.Semaphore(SEED_WORKERS)
+    found_count = 0
+    checked = 0
+    lock = asyncio.Lock()
 
-    # worker consumes seeds and runs checks
-    async def worker(worker_id: int):
-        async with asyncio.Semaphore(1):
-            while True:
-                seed = await queue.get()
-                if seed is None:
-                    # propagate sentinel and exit
-                    await queue.put(None)
-                    queue.task_done()
-                    break
-                try:
-                    res = await check_balance_master("SEED", seed)
-                    if res:
-                        v, balances = res
+    async def process_one(seed: str):
+        nonlocal found_count, checked
+        async with sem:
+            try:
+                res = await check_balance_master("SEED", seed)
+                if res:
+                    v, balances = res
+                    try:
+                        already = storage.is_alerted("SEED", v)
+                    except Exception:
+                        already = False
+                    if not already:
+                        msg = format_found_message("SEED", v, balances)
+                        await safe_send_message(update, msg, context)
                         try:
-                            already = storage.is_alerted("SEED", v)
-                        except Exception as e:
-                            logger.exception(f"Storage check error: {e}")
-                            already = False
+                            storage.mark_alerted("SEED", v)
+                        except Exception:
+                            logger.exception("Erro ao marcar alert")
+                        async with lock:
+                            found_count += 1
+            except Exception as e:
+                logger.exception(f"Erro ao processar seed: {e}")
+            finally:
+                async with lock:
+                    checked += 1
+                    # atualiza status a cada 10 ou no final
+                    if checked % 10 == 0 or checked == total:
+                        try:
+                            await safe_edit_message(
+                                status_msg,
+                                f"⏳ Progresso: {checked}/{total} | Saldos encontrados: {found_count}",
+                            )
+                        except Exception:
+                            pass
 
-                        if not already:
-                            msg = format_found_message("SEED", v, balances)
-                            await safe_send_message(update, msg, context)
-                            try:
-                                storage.mark_alerted("SEED", v)
-                            except Exception:
-                                logger.exception("Erro ao marcar alert no storage")
-                except Exception as e:
-                    logger.exception(f"Worker {worker_id} erro ao processar seed: {e}")
-                finally:
-                    queue.task_done()
+    await asyncio.gather(*(process_one(s) for s in seeds))
 
-    # start workers
-    workers = [asyncio.create_task(worker(i)) for i in range(SEED_WORKERS)]
-
-    # wait for producer and processing to finish
-    await prod_task
-    await queue.join()
-
-    # cancel workers
-    for w in workers:
-        w.cancel()
-    await asyncio.gather(*workers, return_exceptions=True)
-
-    await safe_edit_message(status_msg, f"✅ Extração e varredura concluídas. Itens verificados e alertas enviados.", context)
-    # clear user pool
+    await safe_edit_message(
+        status_msg,
+        f"✅ Concluído.\n"
+        f"• Seeds verificadas: {total}\n"
+        f"• Com saldo: {found_count}",
+    )
     user_pools[user_id] = []
 
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
         return
+    if not update.message:
+        return
+
     user_id = update.effective_user.id
     text = ""
 
     if update.message.document:
-        status = await safe_send_message(update, "⏳ Lendo arquivo... Isso pode levar alguns segundos.", context)
+        status = await safe_send_message(
+            update, "⏳ Lendo arquivo...", context
+        )
         try:
             file = await context.bot.get_file(update.message.document.file_id)
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
                 await file.download_to_drive(tmp.name)
-                # read into memory (kept as requested); for very large files consider changing
-                with open(tmp.name, 'r', encoding='utf-8', errors='ignore') as f:
+                with open(tmp.name, "r", encoding="utf-8", errors="ignore") as f:
                     text = f.read()
-            os.unlink(tmp.name)
-            await safe_edit_message(status, f"✅ Arquivo de {len(text)} caracteres lido com sucesso. Use /check para processar.", context)
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+            await safe_edit_message(
+                status,
+                f"✅ Arquivo de {len(text)} caracteres lido. Use /check para processar.",
+            )
         except Exception as e:
-            await safe_edit_message(status, f"❌ Erro ao ler arquivo: {e}", context)
+            await safe_edit_message(status, f"❌ Erro ao ler arquivo: {e}")
             return
     elif update.message.text:
         text = update.message.text
         await safe_send_message(update, "📥 Texto adicionado. Use /check", context)
 
     if text.strip():
-        if user_id not in user_pools:
-            user_pools[user_id] = []
-        user_pools[user_id].append(text)
+        user_pools.setdefault(user_id, []).append(text)
 
 
 def main():
@@ -267,9 +293,13 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("clear", clear_pool))
     application.add_handler(CommandHandler("check", check_pool))
-    application.add_handler(MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, handle_input))
-
-    # run with the higher-level run_polling API
+    application.add_handler(
+        MessageHandler(
+            (filters.TEXT | filters.Document.ALL) & ~filters.COMMAND,
+            handle_input,
+        )
+    )
+    logger.info("Bot iniciando polling...")
     application.run_polling(drop_pending_updates=True)
 
 
