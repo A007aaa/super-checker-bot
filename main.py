@@ -48,7 +48,8 @@ except Exception as e:
 user_pools: dict[int, list[str]] = {}
 
 TELEGRAM_MAX_CHARS = 4096
-SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "4")))
+# quantas seeds processar em paralelo
+SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "25")))
 
 RAILWAY_DOMAIN = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip(";")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"telegram/{secrets.token_hex(8)}")
@@ -146,6 +147,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🚀 Super Checker Bot pronto!\n"
         "Envie texto/arquivo .txt e use /check.\n"
         "Cadeias: BTC, ETH+USDT, SOL, TRX+USDT.\n"
+        f"Paralelo: {SEED_WORKERS} seeds | ~500 paths/seed.\n"
         "Comandos: /start /check /clear",
         context,
     )
@@ -191,17 +193,19 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await safe_edit_message(
             status_msg,
             "⚠️ Nenhuma seed BIP39 válida encontrada.\n"
-            "Precisa de 12/15/18/21/24 palavras com checksum correto.",
+            "Precisa de 12/15/18/21/24 palavras com checksum correto.\n"
+            "Se as palavras estiverem certas mas o checksum falhar, a seed é inválida.",
         )
         user_pools[user_id] = []
         return
 
     total = len(seeds)
-    logger.info(f"✅ {total} seed(s) válida(s)")
+    logger.info(f"✅ {total} seed(s) válida(s) — workers={SEED_WORKERS}")
     await safe_edit_message(
         status_msg,
         f"✅ {total} seed(s) válida(s).\n"
-        f"Verificando BTC/ETH/SOL/TRX (pode demorar)...",
+        f"Workers: {SEED_WORKERS} | ~500 paths/seed\n"
+        f"Verificando BTC/ETH/SOL/TRX...",
     )
 
     sem = asyncio.Semaphore(SEED_WORKERS)
@@ -218,7 +222,6 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 res = await check_balance_master("SEED", seed)
                 if res:
                     v, balances = res
-                    # Sempre notifica quando há saldo (mesmo se já alertado antes)
                     msg = format_found_message("SEED", v, balances)
                     await safe_send_message(update, msg, context)
                     try:
@@ -237,7 +240,7 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             finally:
                 async with lock:
                     checked += 1
-                    if checked % 5 == 0 or checked == total:
+                    if checked % 10 == 0 or checked == total:
                         await safe_edit_message(
                             status_msg,
                             f"⏳ {checked}/{total} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}",
@@ -250,9 +253,9 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"✅ Concluído\n"
         f"• Seeds válidas: {total}\n"
         f"• Com saldo: {found_count}\n"
-        f"• Sem saldo (nos caminhos varidos): {zero_count}\n"
+        f"• Sem saldo (paths BIP44/84): {zero_count}\n"
         f"• Erros: {error_count}\n\n"
-        f"Obs: só BTC/ETH(+USDT)/SOL/TRX(+USDT), paths BIP44/84 padrão.",
+        f"Limite: BTC, ETH(+USDT), SOL, TRX(+USDT).",
     )
     user_pools[user_id] = []
 
