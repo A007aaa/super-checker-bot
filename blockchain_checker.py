@@ -22,7 +22,6 @@ SCAN_ACCOUNTS = int(os.getenv("SCAN_ACCOUNTS", "5"))
 CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", "20"))
 CHECK_RETRIES = int(os.getenv("CHECK_RETRIES", "2"))
 RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.4"))
-# early_stop: para após achar saldo em UM path (mas checa TODAS as redes desse path)
 EARLY_STOP = os.getenv("EARLY_STOP", "true").lower() in ("1", "true", "yes")
 
 PROVIDERS = {
@@ -33,6 +32,12 @@ PROVIDERS = {
 }
 
 PROVIDER_SEMAPHORES = {k: asyncio.Semaphore(PER_PROVIDER_LIMIT) for k in PROVIDERS}
+
+
+def preview_addresses(seed: str) -> dict:
+    """Endereços path m/44'/coin'/0'/0/0 para diagnóstico."""
+    seed_bytes = Bip39SeedGenerator(seed).Generate()
+    return _derive_addrs(seed_bytes, 0, 0, Bip44Changes.CHAIN_EXT)
 
 
 async def _fetch_with_retries(session, method: str, url: str, **kwargs):
@@ -240,7 +245,6 @@ def _derive_addrs(seed_bytes, acct: int, idx: int, change):
 
 
 async def _check_all_chains(session, addrs) -> list:
-    """Checa TODAS as redes deste path em paralelo. Retorna lista de hits."""
     coros = [
         check_eth(session, addrs["eth"]),
         check_usdt_eth(session, addrs["eth"]),
@@ -298,7 +302,6 @@ async def check_seed_params(
                             f"{[h[0] for h in hits]}"
                         )
                         if early_stop:
-                            # já checou TODAS as redes deste path; pode parar
                             return (seed, found)
                 except Exception as e:
                     logger.debug(f"   ⚠️ path {acct}/{idx}: {e}")
@@ -307,7 +310,6 @@ async def check_seed_params(
     if found:
         return (seed, found)
 
-    # debug: mostra endereço ETH[0] para o usuário validar no explorer
     try:
         a0 = _derive_addrs(seed_bytes, 0, 0, Bip44Changes.CHAIN_EXT)
         logger.info(
@@ -331,36 +333,56 @@ async def check_balance_master(type, value):
             return (value, [r]) if r else None
         if type == "KEY_HEX":
             addr = value if value.startswith("0x") else f"0x{value}"
-            hits = [x for x in await asyncio.gather(
-                check_eth(session, addr), check_usdt_eth(session, addr)
-            ) if x]
+            hits = [
+                x
+                for x in await asyncio.gather(
+                    check_eth(session, addr), check_usdt_eth(session, addr)
+                )
+                if x
+            ]
             return (value, hits) if hits else None
         if type == "ADDR_ETH":
-            hits = [x for x in await asyncio.gather(
-                check_eth(session, value), check_usdt_eth(session, value)
-            ) if x]
+            hits = [
+                x
+                for x in await asyncio.gather(
+                    check_eth(session, value), check_usdt_eth(session, value)
+                )
+                if x
+            ]
             return (value, hits) if hits else None
         if type == "ADDR_BTC":
             r = await check_btc(session, value)
             return (value, [r]) if r else None
         if type == "ADDR_TRON":
-            hits = [x for x in await asyncio.gather(
-                check_trx(session, value), check_usdt_trx(session, value)
-            ) if x]
+            hits = [
+                x
+                for x in await asyncio.gather(
+                    check_trx(session, value), check_usdt_trx(session, value)
+                )
+                if x
+            ]
             return (value, hits) if hits else None
         if type == "ADDR_SOL":
             r = await check_sol(session, value)
             return (value, [r]) if r else None
 
         if value.startswith("0x") and len(value) == 42:
-            hits = [x for x in await asyncio.gather(
-                check_eth(session, value), check_usdt_eth(session, value)
-            ) if x]
+            hits = [
+                x
+                for x in await asyncio.gather(
+                    check_eth(session, value), check_usdt_eth(session, value)
+                )
+                if x
+            ]
             return (value, hits) if hits else None
         if value.startswith("T") and len(value) == 34:
-            hits = [x for x in await asyncio.gather(
-                check_trx(session, value), check_usdt_trx(session, value)
-            ) if x]
+            hits = [
+                x
+                for x in await asyncio.gather(
+                    check_trx(session, value), check_usdt_trx(session, value)
+                )
+                if x
+            ]
             return (value, hits) if hits else None
         if value.startswith("bc1") or value.startswith(("1", "3")):
             r = await check_btc(session, value)
