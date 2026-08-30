@@ -60,58 +60,48 @@ class SeedExtractor:
         for key in eth_keys:
             results.append(("KEY_HEX", key))
 
-        # 5. Seeds BIP39 — sem limite de palavras, suporta até 1 milhão
+        # 5. Seeds BIP39 — detecção corrigida: garantimos contiguidade e todos os tamanhos válidos
         logger.info("🔍 Iniciando busca de seeds BIP39...")
         clean_text = re.sub(r'[^a-zA-Z\s]', ' ', text).lower()
         all_words = clean_text.split()
+        total_words = len(all_words)
+        logger.info(f"📊 Total de palavras no texto: {total_words}")
 
-        # Filtra apenas palavras BIP39 usando set para O(1) por lookup
-        bip39_words = [w for w in all_words if w in self.wordlist]
-        total_bip39 = len(bip39_words)
-        logger.info(f"📊 Total de palavras BIP39 encontradas: {total_bip39}")
+        # Encontramos seeds considerando apenas janelas contíguas do texto original.
+        # Percorremos tamanhos válidos do BIP39 do maior para o menor para preferir seeds maiores
+        # quando houver sobreposição.
+        found_seeds: dict = {}
+        if total_words >= 12:
+            used = [False] * total_words
+            bip39_sizes = [24, 21, 18, 15, 12]
 
-        if total_bip39 >= 12:
-            # Dict de seeds encontradas: {seed: quantidade_de_palavras}
-            # Permite saber o tamanho de cada seed para preferir a versão de
-            # 24 palavras quando uma seed de 12 palavras estiver contida
-            # (como prefixo) dentro de uma seed de 24 palavras válida.
-            found_seeds: dict = {}
-
-            # Buscamos primeiro sequências de 12 (mais comum)
-            logger.info("🔎 Buscando seeds de 12 palavras...")
-            seeds_12 = 0
-            for i in range(total_bip39 - 12 + 1):
-                if i > 0 and i % 10000 == 0:
-                    logger.info(f"   Progresso: {i} / {total_bip39 - 12 + 1} | Seeds encontradas: {seeds_12}")
-                phrase = " ".join(bip39_words[i : i + 12])
-                if phrase not in found_seeds and self.is_valid_bip39(phrase):
-                    found_seeds[phrase] = 12
-                    seeds_12 += 1
-            logger.info(f"✅ Seeds de 12 palavras encontradas: {seeds_12}")
-
-            # Depois sequências de 24
-            logger.info("🔎 Buscando seeds de 24 palavras...")
-            seeds_24 = 0
-            for i in range(total_bip39 - 24 + 1):
-                if i > 0 and i % 10000 == 0:
-                    logger.info(f"   Progresso: {i} / {total_bip39 - 24 + 1} | Seeds encontradas: {seeds_24}")
-                phrase = " ".join(bip39_words[i : i + 24])
-                if phrase in found_seeds:
+            for size in bip39_sizes:
+                if total_words < size:
                     continue
-                if self.is_valid_bip39(phrase):
-                    # Se a seed de 12 palavras que abre esta frase de 24 já foi
-                    # encontrada, ela está contida (como prefixo) na de 24 —
-                    # removemos a de 12 e mantemos apenas a de 24 (mais completa).
-                    seed_12_prefix = " ".join(bip39_words[i : i + 12])
-                    if found_seeds.get(seed_12_prefix) == 12:
-                        del found_seeds[seed_12_prefix]
-                        seeds_12 -= 1
-                        logger.info(f"   ↪️ Seed de 12 palavras substituída pela de 24 (sobreposição detectada)")
+                logger.info(f"🔎 Buscando seeds de {size} palavras...")
+                count = 0
+                limit = total_words - size + 1
+                for i in range(limit):
+                    # Pular janelas que já contenham índices marcados por uma seed maior
+                    if any(used[i : i + size]):
+                        continue
+                    window = all_words[i : i + size]
+                    # Só interessa se todas as palavras da janela pertencem ao BIP39
+                    if not all(w in self.wordlist for w in window):
+                        continue
+                    phrase = " ".join(window)
+                    if phrase in found_seeds:
+                        continue
+                    if self.is_valid_bip39(phrase):
+                        # Marca índices como usados para evitar sobreposição por seeds menores
+                        for j in range(i, i + size):
+                            used[j] = True
+                        found_seeds[phrase] = size
+                        count += 1
+                        logger.debug(f"   Encontrada seed de {size} palavras na posição {i}")
+                logger.info(f"✅ Seeds de {size} palavras encontradas: {count}")
 
-                    found_seeds[phrase] = 24
-                    seeds_24 += 1
-            logger.info(f"✅ Seeds de 24 palavras encontradas: {seeds_24}")
-            logger.info(f"✅ Total de seeds BIP39 encontradas (sem duplicatas/sobreposições): {len(found_seeds)}")
+            logger.info(f"✅ Total de seeds BIP39 encontradas (sem sobreposições): {len(found_seeds)}")
 
             for seed in found_seeds:
                 results.append(("SEED", seed))
