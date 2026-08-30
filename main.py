@@ -264,7 +264,16 @@ def main():
     application.add_handler(MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, handle_input))
 
     # run with the higher-level run_polling API
-    application.run_polling(drop_pending_updates=True)
+    try:
+        application.run_polling(drop_pending_updates=True)
+    except telegram.error.Conflict:
+        # Friendly exit to avoid noisy tracebacks when another instance or webhook exists
+        logger.error("Conflict detected: another getUpdates process or webhook is active. Exiting cleanly.")
+        try:
+            application.stop()
+        except Exception:
+            pass
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
