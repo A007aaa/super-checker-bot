@@ -15,13 +15,16 @@ from bip_utils import (
 
 logger = logging.getLogger(__name__)
 
-CHECK_CONCURRENCY = int(os.getenv("CHECK_CONCURRENCY", "80"))
-PER_PROVIDER_LIMIT = int(os.getenv("PER_PROVIDER_LIMIT", "20"))
-SCAN_ADDRESSES = int(os.getenv("SCAN_ADDRESSES", "20"))
-SCAN_ACCOUNTS = int(os.getenv("SCAN_ACCOUNTS", "2"))
-CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", "15"))
-CHECK_RETRIES = int(os.getenv("CHECK_RETRIES", "2"))
-RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.3"))
+# --- SPEED defaults (bulk): path 0 only, 1 retry, short timeout ---
+CHECK_CONCURRENCY = int(os.getenv("CHECK_CONCURRENCY", "120"))
+PER_PROVIDER_LIMIT = int(os.getenv("PER_PROVIDER_LIMIT", "40"))
+SCAN_ADDRESSES = int(os.getenv("SCAN_ADDRESSES", "3"))   # era 20 → lento
+SCAN_ACCOUNTS = int(os.getenv("SCAN_ACCOUNTS", "1"))     # era 2
+# false = só change external (99% das carteiras)
+SCAN_INTERNAL = os.getenv("SCAN_INTERNAL", "false").lower() in ("1", "true", "yes")
+CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", "8"))
+CHECK_RETRIES = int(os.getenv("CHECK_RETRIES", "1"))
+RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.2"))
 EARLY_STOP = os.getenv("EARLY_STOP", "true").lower() in ("1", "true", "yes")
 
 TRC20_KNOWN = {
@@ -76,8 +79,8 @@ async def _fetch_with_retries(session, method: str, url: str, **kwargs):
                 return res.status, text
         except Exception as e:
             last_exc = e
-            if attempt <= CHECK_RETRIES + 1:
-                await asyncio.sleep((RETRY_BACKOFF_BASE ** (attempt - 1)) * (0.3 + random.random() * 0.4))
+            if attempt <= CHECK_RETRIES:
+                await asyncio.sleep(0.2 * attempt)
     if last_exc:
         raise last_exc
     return 0, None
@@ -187,8 +190,10 @@ async def check_tron_all(session, addr) -> list:
                         name, decimals = TRC20_KNOWN[contract]
                         hits.append((name, addr, raw_i / (10**decimals)))
                     else:
-                        short = contract[:6] + "…" + contract[-4:]
-                        hits.append((f"TRC20_{short}", addr, raw_i / 10**6))
+                        # bulk: só reporta TRC20 desconhecido se raw "grande" (evita spam de dust)
+                        if raw_i >= 1_000_000:  # >= 1 unidade se 6 dec
+                            short = contract[:6] + "…" + contract[-4:]
+                            hits.append((f"TRC20_{short}", addr, raw_i / 10**6))
         except Exception as e:
             logger.debug(f"[TRON] {addr}: {e}")
     return hits
@@ -210,6 +215,7 @@ def _derive_addrs(seed_bytes, acct: int, idx: int, change):
 
 
 async def _check_all_chains(session, addrs) -> list:
+    """Todas as redes em paralelo neste path."""
     evm = addrs["eth"]
     results = await asyncio.gather(
         check_tron_all(session, addrs["trx"]),
@@ -245,7 +251,11 @@ async def check_seed_params(session, seed: str, accounts: int = None, indexes: i
         logger.error(f"Derivacao: {e}")
         return None
 
-    changes = (Bip44Changes.CHAIN_EXT, Bip44Changes.CHAIN_INT)
+    if SCAN_INTERNAL:
+        changes = (Bip44Changes.CHAIN_EXT, Bip44Changes.CHAIN_INT)
+    else:
+        changes = (Bip44Changes.CHAIN_EXT,)
+
     found = []
     for acct in range(max(1, accounts)):
         for idx in range(max(1, indexes)):
@@ -295,19 +305,26 @@ async def check_balance_master(type, value, session=None):
         return await _run(sess)
 
 
-async def check_seeds_bulk(seeds: list[str], workers: int = 20):
+async def check_seeds_bulk(seeds: list[str], workers: int = 40):
+    """Processa seeds em paralelo com session compartilhada."""
     sem = asyncio.Semaphore(max(1, workers))
     queue: asyncio.Queue = asyncio.Queue()
-    async with aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(limit=CHECK_CONCURRENCY, ttl_dns_cache=300)
-    ) as session:
+
+    connector = aiohttp.TCPConnector(
+        limit=CHECK_CONCURRENCY,
+        limit_per_host=PER_PROVIDER_LIMIT,
+        ttl_dns_cache=300,
+        enable_cleanup_closed=True,
+    )
+    async with aiohttp.ClientSession(connector=connector) as session:
+
         async def worker(seed: str):
             async with sem:
                 try:
                     res = await check_seed_params(session, seed)
                     await queue.put(("ok", seed, res))
                 except Exception as e:
-                    logger.exception(f"bulk seed error: {e}")
+                    logger.debug(f"bulk error: {e}")
                     await queue.put(("err", seed, e))
 
         tasks = [asyncio.create_task(worker(s)) for s in seeds]
