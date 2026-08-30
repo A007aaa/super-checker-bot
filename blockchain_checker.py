@@ -2,7 +2,9 @@ import asyncio
 import aiohttp
 import logging
 import os
+import math
 import random
+import json
 from bip_utils import (
     Bip39SeedGenerator, Bip44, Bip44Coins, Bip44Changes,
     Bip84, Bip84Coins
@@ -33,6 +35,11 @@ PROVIDER_SEMAPHORES = {k: asyncio.Semaphore(PER_PROVIDER_LIMIT) for k in PROVIDE
 
 
 async def _fetch_with_retries(session, method: str, url: str, provider: str = None, **kwargs):
+    """Perform HTTP request with retries and exponential backoff.
+
+    Returns a tuple (status:int, text:str). Do NOT return the response object because the
+    aiohttp response is closed when exiting the request context manager.
+    """
     last_exc = None
     for attempt in range(1, CHECK_RETRIES + 2):
         try:
@@ -43,7 +50,7 @@ async def _fetch_with_retries(session, method: str, url: str, provider: str = No
                 except Exception:
                     text = None
                 logger.debug(f"HTTP {method} {url} [attempt {attempt}] -> status {res.status}")
-                return res, text
+                return res.status, text
         except asyncio.TimeoutError as e:
             logger.warning(f"   ⏱️ Timeout {method} {url} attempt {attempt}/{CHECK_RETRIES+1}")
             last_exc = e
@@ -62,16 +69,16 @@ async def _fetch_with_retries(session, method: str, url: str, provider: str = No
     raise last_exc
 
 
-# Low-level checks (kept similar, but expected to be called one-by-one under semaphores)
+# Low-level checks (kept similar, but now use status/text instead of response objects)
 async def check_sol(session, addr):
     async with PROVIDER_SEMAPHORES['sol']:
         try:
             logger.debug(f"   🌐 [SOL] Verificando endereço: {addr}")
             payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [addr]}
-            res, text = await _fetch_with_retries(session, 'POST', PROVIDERS['sol'][0], provider='sol', json=payload)
-            if res.status == 200:
+            status, text = await _fetch_with_retries(session, 'POST', PROVIDERS['sol'][0], provider='sol', json=payload)
+            if status == 200:
                 try:
-                    data = await res.json()
+                    data = json.loads(text) if text else {}
                 except Exception:
                     data = {}
                 bal = data.get('result', {}).get('value', 0) / 10**9
@@ -81,7 +88,7 @@ async def check_sol(session, addr):
                 else:
                     logger.debug(f"   ⚪ [SOL] Saldo zero em {addr}")
             else:
-                logger.debug(f"   ⚠️ [SOL] Response {res.status} for {addr} - body: {text}")
+                logger.debug(f"   ⚠️ [SOL] Response {status} for {addr} - body: {text}")
         except Exception as e:
             logger.error(f"   ❌ [SOL] Erro ao verificar {addr}: {e}")
     return ()
@@ -91,12 +98,12 @@ async def check_eth_usdt(session, addr):
     async with PROVIDER_SEMAPHORES['eth']:
         results = []
         try:
-            logger.debug(f"   🌐 [ETH] Verificando endereço: {addr}")
+            logger.debug(f"   🌐 [ETH] Verificando endereco: {addr}")
             payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [addr, "latest"]}
-            res, text = await _fetch_with_retries(session, 'POST', PROVIDERS['eth'][0], provider='eth', json=payload)
-            if res.status == 200:
+            status, text = await _fetch_with_retries(session, 'POST', PROVIDERS['eth'][0], provider='eth', json=payload)
+            if status == 200:
                 try:
-                    data = await res.json()
+                    data = json.loads(text) if text else {}
                 except Exception:
                     data = {}
                 bal = int(data.get('result', '0x0'), 16) / 10**18
@@ -106,17 +113,17 @@ async def check_eth_usdt(session, addr):
                 else:
                     logger.debug(f"   ⚪ [ETH] Saldo zero em {addr}")
             else:
-                logger.debug(f"   ⚠️ [ETH] Response {res.status} for {addr} - body: {text}")
+                logger.debug(f"   ⚠️ [ETH] Response {status} for {addr} - body: {text}")
 
             # USDT (ERC20)
             logger.debug(f"   🌐 [USDT_ETH] Verificando endereco: {addr}")
             usdt_contract = "0xdac17f958d2ee523a2206206994597c13d831ec7"
             data_call = "0x70a08231" + addr[2:].lower().zfill(64)
             payload_u = {"jsonrpc": "2.0", "id": 1, "method": "eth_call", "params": [{"to": usdt_contract, "data": data_call}, "latest"]}
-            res_u, text_u = await _fetch_with_retries(session, 'POST', PROVIDERS['eth'][0], provider='eth', json=payload_u)
-            if res_u.status == 200:
+            status_u, text_u = await _fetch_with_retries(session, 'POST', PROVIDERS['eth'][0], provider='eth', json=payload_u)
+            if status_u == 200:
                 try:
-                    data = await res_u.json()
+                    data = json.loads(text_u) if text_u else {}
                 except Exception:
                     data = {}
                 u_bal = int(data.get('result', '0x0'), 16) / 10**6
@@ -126,7 +133,7 @@ async def check_eth_usdt(session, addr):
                 else:
                     logger.debug(f"   ⚪ [USDT_ETH] Saldo zero em {addr}")
             else:
-                logger.debug(f"   ⚠️ [USDT_ETH] Response {res_u.status} for {addr} - body: {text_u}")
+                logger.debug(f"   ⚠️ [USDT_ETH] Response {status_u} for {addr} - body: {text_u}")
 
         except Exception as e:
             logger.error(f"   ❌ [ETH/USDT] Erro ao verificar {addr}: {e}")
@@ -137,9 +144,8 @@ async def check_btc(session, addr):
     async with PROVIDER_SEMAPHORES['btc']:
         try:
             logger.debug(f"   🌐 [BTC] Verificando endereco: {addr}")
-            # blockchain.info expects GET to /q/addressbalance/{addr}
-            res, text = await _fetch_with_retries(session, 'GET', PROVIDERS['btc'][0] + addr, provider='btc')
-            if res.status == 200:
+            status, text = await _fetch_with_retries(session, 'GET', PROVIDERS['btc'][0] + addr, provider='btc')
+            if status == 200:
                 try:
                     bal = int(text) / 10**8
                 except Exception:
@@ -150,7 +156,7 @@ async def check_btc(session, addr):
                 else:
                     logger.debug(f"   ⚪ [BTC] Saldo zero em {addr}")
             else:
-                logger.debug(f"   ⚠️ [BTC] Response {res.status} for {addr} - body: {text}")
+                logger.debug(f"   ⚠️ [BTC] Response {status} for {addr} - body: {text}")
         except Exception as e:
             logger.error(f"   ❌ [BTC] Erro ao verificar {addr}: {e}")
     return ()
@@ -161,10 +167,10 @@ async def check_tron_usdt(session, addr):
         results = []
         try:
             logger.debug(f"   🌐 [TRX] Verificando endereco: {addr}")
-            res, text = await _fetch_with_retries(session, 'GET', PROVIDERS['tron'][0] + addr, provider='tron')
-            if res.status == 200:
+            status, text = await _fetch_with_retries(session, 'GET', PROVIDERS['tron'][0] + addr, provider='tron')
+            if status == 200:
                 try:
-                    data = await res.json()
+                    data = json.loads(text) if text else {}
                 except Exception:
                     data = {}
                 if data.get('data'):
@@ -201,7 +207,7 @@ async def check_tron_usdt(session, addr):
                 else:
                     logger.debug(f"   ⚪ [TRX] Conta nao encontrada / sem dados em {addr}")
             else:
-                logger.debug(f"   ⚠️ [TRX] Response {res.status} for {addr} - body: {text}")
+                logger.debug(f"   ⚠️ [TRX] Response {status} for {addr} - body: {text}")
         except Exception as e:
             logger.error(f"   ❌ [TRX] Erro ao verificar {addr}: {e}")
         return tuple(results)
@@ -232,6 +238,8 @@ async def check_seed_params(session, seed: str, accounts: int = 1, indexes: int 
                 btc_leg = b44_btc.PublicKey().ToAddress()
                 eth = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(acct).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx)
                 eth_addr = eth.PublicKey().ToAddress()
+                sol = Bip44.FromSeed(seed_bytes, Bip84Coins.SOLANA) if False else Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA)
+                # Note: bip_utils has variations for Solana; above line keeps previous behavior
                 sol = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA).Purpose().Coin().Account(acct).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx)
                 sol_addr = sol.PublicKey().ToAddress()
                 trx = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(acct).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx)
