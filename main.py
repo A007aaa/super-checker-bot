@@ -15,7 +15,7 @@ except ImportError:
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from blockchain_checker import check_balance_master
+from blockchain_checker import check_balance_master, preview_addresses
 from tools.seed_extractor import SeedExtractor
 import storage
 import telegram.error
@@ -63,7 +63,6 @@ NETWORK_LABELS = {
     "USDT_TRX": "Tether USDT (Tron TRC-20)",
 }
 
-# Seed pública de teste BIP39 (conhecida, tem pó de saldo em algumas redes)
 TEST_SEED = (
     "abandon abandon abandon abandon abandon abandon "
     "abandon abandon abandon abandon abandon about"
@@ -170,13 +169,11 @@ async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Testa o checker com a seed pública BIP39 de exemplo."""
     if not await is_authorized(update):
         return
     status = await safe_send_message(
         update,
-        "🧪 Testando checker com seed pública BIP39...\n"
-        "(abandon … about)",
+        "🧪 Testando checker com seed pública BIP39...",
         context,
     )
     try:
@@ -185,13 +182,13 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             _v, balances = res
             await safe_edit_message(
                 status,
-                "✅ Checker OK no Railway!\n\n" + format_found_message("SEED", TEST_SEED, balances),
+                "✅ Checker OK!\n\n"
+                + format_found_message("SEED", TEST_SEED, balances),
             )
         else:
             await safe_edit_message(
                 status,
-                "⚠️ Checker rodou, mas não viu saldo na seed de teste.\n"
-                "Pode ser rate-limit de RPC. Tente de novo em 1 min.",
+                "⚠️ Checker rodou sem saldo na seed de teste (RPC?). Tente de novo.",
             )
     except Exception as e:
         logger.exception("test_cmd failed")
@@ -221,29 +218,44 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     extractor = SeedExtractor()
     try:
-        seeds = await asyncio.to_thread(extractor.extract_all, full_text)
+        stats = await asyncio.to_thread(extractor.extract_with_stats, full_text)
+        seeds = stats.valid
     except Exception as e:
         logger.exception("Falha na extração")
         await safe_edit_message(status_msg, f"❌ Erro na extração: {e}")
         return
 
     if not seeds:
+        fail_n = len(stats.failed_checksum)
+        extra = ""
+        if fail_n:
+            sample = stats.failed_checksum[0].split()
+            preview = " ".join(sample[:3]) + " ... " + " ".join(sample[-3:])
+            extra = (
+                f"\n\n⚠️ {fail_n} frase(s) com palavras BIP39 mas checksum INVÁLIDO.\n"
+                f"Exemplo: {preview}\n"
+                f"Isso NÃO é seed válida — palavra errada ou não-BIP39 (ex: Electrum)."
+            )
         await safe_edit_message(
             status_msg,
-            "⚠️ Nenhuma seed BIP39 válida encontrada.\n\n"
-            "O bot NÃO ignora seeds de propósito — só processa frases\n"
-            "com 12/15/18/21/24 palavras e checksum BIP39 correto.\n\n"
-            "Se a frase tiver palavra errada ou fora da wordlist, é inválida.",
+            f"⚠️ Nenhuma seed BIP39 válida.\n"
+            f"Palavras no texto: {stats.total_words}\n"
+            f"Janelas analisadas: {stats.windows_scanned}"
+            f"{extra}\n\n"
+            f"O bot não ignora de propósito: só aceita 12/15/18/21/24 palavras\n"
+            f"com checksum BIP39 inglês correto.",
         )
         user_pools[user_id] = []
         return
 
     total = len(seeds)
     logger.info(f"✅ {total} seed(s) — workers={SEED_WORKERS}")
+    diag = f"✅ {total} seed(s) BIP39 válida(s)"
+    if stats.failed_checksum:
+        diag += f"\n⚠️ {len(stats.failed_checksum)} com checksum inválido (ignoradas)"
     await safe_edit_message(
         status_msg,
-        f"✅ {total} seed(s) BIP39 válida(s).\n"
-        f"Checando BTC/ETH/USDT/SOL/TRX em paralelo...",
+        diag + "\nChecando BTC/ETH/USDT/SOL/TRX...",
     )
 
     sem = asyncio.Semaphore(SEED_WORKERS)
@@ -251,6 +263,7 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     zero_count = 0
     error_count = 0
     checked = 0
+    zero_samples: list[str] = []
     lock = asyncio.Lock()
 
     async def process_one(seed: str):
@@ -271,6 +284,19 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 else:
                     async with lock:
                         zero_count += 1
+                        if len(zero_samples) < 3:
+                            try:
+                                addrs = preview_addresses(seed)
+                                words = seed.split()
+                                prev = " ".join(words[:2]) + "…" + " ".join(words[-2:])
+                                zero_samples.append(
+                                    f"• {prev}\n"
+                                    f"  ETH `{addrs.get('eth','?')}`\n"
+                                    f"  SOL `{addrs.get('sol','?')}`\n"
+                                    f"  TRX `{addrs.get('trx','?')}`"
+                                )
+                            except Exception:
+                                pass
             except Exception as e:
                 logger.exception(f"Erro seed: {e}")
                 async with lock:
@@ -286,15 +312,21 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     await asyncio.gather(*(process_one(s) for s in seeds))
 
-    await safe_edit_message(
-        status_msg,
+    summary = (
         f"✅ Concluído\n"
         f"• Seeds BIP39 válidas: {total}\n"
         f"• Com saldo: {found_count}\n"
-        f"• Sem saldo nos paths padrão: {zero_count}\n"
-        f"• Erros de rede: {error_count}\n\n"
-        f"Use /test para validar se o checker está OK no Railway.",
+        f"• Sem saldo (path padrão): {zero_count}\n"
+        f"• Erros de rede: {error_count}"
     )
+    if zero_samples:
+        summary += (
+            "\n\n🔎 Endereços derivados (path 0) das seeds sem saldo:\n"
+            + "\n".join(zero_samples)
+            + "\n\nConfira esses endereços no explorer. Se o saldo da carteira\n"
+            "estiver em OUTRO endereço, é path/rede diferente (BSC, passphrase, etc)."
+        )
+    await safe_edit_message(status_msg, summary)
     user_pools[user_id] = []
 
 
