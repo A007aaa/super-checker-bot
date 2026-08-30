@@ -48,12 +48,26 @@ except Exception as e:
 user_pools: dict[int, list[str]] = {}
 
 TELEGRAM_MAX_CHARS = 4096
-# quantas seeds processar em paralelo
-SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "25")))
+SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "15")))
 
 RAILWAY_DOMAIN = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip(";")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"telegram/{secrets.token_hex(8)}")
 PORT = int(os.getenv("PORT", "8080"))
+
+NETWORK_LABELS = {
+    "BTC": "Bitcoin (BTC)",
+    "ETH": "Ethereum (ETH)",
+    "USDT_ETH": "Tether USDT (Ethereum ERC-20)",
+    "SOL": "Solana (SOL)",
+    "TRX": "Tron (TRX)",
+    "USDT_TRX": "Tether USDT (Tron TRC-20)",
+}
+
+# Seed pública de teste BIP39 (conhecida, tem pó de saldo em algumas redes)
+TEST_SEED = (
+    "abandon abandon abandon abandon abandon abandon "
+    "abandon abandon abandon abandon abandon about"
+)
 
 
 def format_seed_display(item_type: str, value: str, show_full: bool = False) -> str:
@@ -67,24 +81,21 @@ def format_seed_display(item_type: str, value: str, show_full: bool = False) -> 
         else:
             preview = value
         return f"SEED (Hash: {sha256_hash})\n{preview}"
-
-    if item_type in ("KEY_SOL", "KEY_HEX"):
-        truncated = value[:10] + "..." + value[-10:] if len(value) > 20 else value
-        return f"{item_type}\n{truncated}"
-
     return f"{item_type}\n{value}"
 
 
 def format_found_message(item_type: str, value: str, balances: list) -> str:
     seed_line = format_seed_display(item_type, value, show_full=False)
-    balance_lines = "\n".join(
-        f"• {coin}: {bal}\n  `{addr}`" for coin, addr, bal in balances
-    )
+    lines = []
+    for coin, addr, bal in balances:
+        label = NETWORK_LABELS.get(coin, coin)
+        lines.append(f"• {label}\n  Saldo: {bal}\n  Endereço: `{addr}`")
+    balance_block = "\n\n".join(lines)
     msg = (
         f"🎯 SALDO ENCONTRADO!\n\n"
         f"{seed_line}\n\n"
-        f"💰 Saldos:\n"
-        f"{balance_lines}"
+        f"💰 Redes com saldo:\n\n"
+        f"{balance_block}"
     )
     if len(msg) > TELEGRAM_MAX_CHARS:
         msg = msg[: TELEGRAM_MAX_CHARS - 3] + "..."
@@ -111,9 +122,7 @@ async def safe_send_message(
             return await context.bot.send_message(
                 chat_id=update.effective_chat.id, text=text
             )
-        logger.error("safe_send_message: sem meio de enviar mensagem")
     except telegram.error.RetryAfter as e:
-        logger.warning(f"Flood control. Aguardando {e.retry_after}s...")
         await asyncio.sleep(e.retry_after)
         if update and getattr(update, "message", None):
             return await update.message.reply_text(text)
@@ -144,11 +153,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await safe_send_message(
         update,
-        "🚀 Super Checker Bot pronto!\n"
-        "Envie texto/arquivo .txt e use /check.\n"
-        "Cadeias: BTC, ETH+USDT, SOL, TRX+USDT.\n"
-        f"Paralelo: {SEED_WORKERS} seeds | ~500 paths/seed.\n"
-        "Comandos: /start /check /clear",
+        "🚀 Super Checker Bot pronto!\n\n"
+        "1) Envie texto ou .txt\n"
+        "2) Use /check\n\n"
+        "Redes: BTC · ETH · USDT-ERC20 · SOL · TRX · USDT-TRC20\n"
+        "Comandos: /start /check /clear /test",
         context,
     )
 
@@ -158,6 +167,35 @@ async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     user_pools[update.effective_user.id] = []
     await safe_send_message(update, "🗑️ Memória limpa.", context)
+
+
+async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Testa o checker com a seed pública BIP39 de exemplo."""
+    if not await is_authorized(update):
+        return
+    status = await safe_send_message(
+        update,
+        "🧪 Testando checker com seed pública BIP39...\n"
+        "(abandon … about)",
+        context,
+    )
+    try:
+        res = await check_balance_master("SEED", TEST_SEED)
+        if res:
+            _v, balances = res
+            await safe_edit_message(
+                status,
+                "✅ Checker OK no Railway!\n\n" + format_found_message("SEED", TEST_SEED, balances),
+            )
+        else:
+            await safe_edit_message(
+                status,
+                "⚠️ Checker rodou, mas não viu saldo na seed de teste.\n"
+                "Pode ser rate-limit de RPC. Tente de novo em 1 min.",
+            )
+    except Exception as e:
+        logger.exception("test_cmd failed")
+        await safe_edit_message(status, f"❌ Erro no teste: {e}")
 
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -192,20 +230,20 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not seeds:
         await safe_edit_message(
             status_msg,
-            "⚠️ Nenhuma seed BIP39 válida encontrada.\n"
-            "Precisa de 12/15/18/21/24 palavras com checksum correto.\n"
-            "Se as palavras estiverem certas mas o checksum falhar, a seed é inválida.",
+            "⚠️ Nenhuma seed BIP39 válida encontrada.\n\n"
+            "O bot NÃO ignora seeds de propósito — só processa frases\n"
+            "com 12/15/18/21/24 palavras e checksum BIP39 correto.\n\n"
+            "Se a frase tiver palavra errada ou fora da wordlist, é inválida.",
         )
         user_pools[user_id] = []
         return
 
     total = len(seeds)
-    logger.info(f"✅ {total} seed(s) válida(s) — workers={SEED_WORKERS}")
+    logger.info(f"✅ {total} seed(s) — workers={SEED_WORKERS}")
     await safe_edit_message(
         status_msg,
-        f"✅ {total} seed(s) válida(s).\n"
-        f"Workers: {SEED_WORKERS} | ~500 paths/seed\n"
-        f"Verificando BTC/ETH/SOL/TRX...",
+        f"✅ {total} seed(s) BIP39 válida(s).\n"
+        f"Checando BTC/ETH/USDT/SOL/TRX em paralelo...",
     )
 
     sem = asyncio.Semaphore(SEED_WORKERS)
@@ -234,13 +272,13 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     async with lock:
                         zero_count += 1
             except Exception as e:
-                logger.exception(f"Erro ao processar seed: {e}")
+                logger.exception(f"Erro seed: {e}")
                 async with lock:
                     error_count += 1
             finally:
                 async with lock:
                     checked += 1
-                    if checked % 10 == 0 or checked == total:
+                    if checked % 5 == 0 or checked == total:
                         await safe_edit_message(
                             status_msg,
                             f"⏳ {checked}/{total} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}",
@@ -251,11 +289,11 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await safe_edit_message(
         status_msg,
         f"✅ Concluído\n"
-        f"• Seeds válidas: {total}\n"
+        f"• Seeds BIP39 válidas: {total}\n"
         f"• Com saldo: {found_count}\n"
-        f"• Sem saldo (paths BIP44/84): {zero_count}\n"
-        f"• Erros: {error_count}\n\n"
-        f"Limite: BTC, ETH(+USDT), SOL, TRX(+USDT).",
+        f"• Sem saldo nos paths padrão: {zero_count}\n"
+        f"• Erros de rede: {error_count}\n\n"
+        f"Use /test para validar se o checker está OK no Railway.",
     )
     user_pools[user_id] = []
 
@@ -282,8 +320,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             except OSError:
                 pass
             await safe_edit_message(
-                status,
-                f"✅ Arquivo de {len(text)} caracteres. Use /check",
+                status, f"✅ Arquivo de {len(text)} caracteres. Use /check"
             )
         except Exception as e:
             await safe_edit_message(status, f"❌ Erro ao ler arquivo: {e}")
@@ -309,6 +346,7 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("clear", clear_pool))
     application.add_handler(CommandHandler("check", check_pool))
+    application.add_handler(CommandHandler("test", test_cmd))
     application.add_handler(
         MessageHandler(
             (filters.TEXT | filters.Document.ALL) & ~filters.COMMAND,
