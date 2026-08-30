@@ -46,9 +46,11 @@ except Exception as e:
     logger.error(f"Failed to initialize storage: {e}")
 
 user_pools: dict[int, list[str]] = {}
+# evita dois /check simultâneos no mesmo usuário
+_running_checks: set[int] = set()
 
 TELEGRAM_MAX_CHARS = 4096
-SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "15")))
+SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "10")))
 
 RAILWAY_DOMAIN = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip(";")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"telegram/{secrets.token_hex(8)}")
@@ -61,6 +63,7 @@ NETWORK_LABELS = {
     "SOL": "Solana (SOL)",
     "TRX": "Tron (TRX)",
     "USDT_TRX": "Tether USDT (Tron TRC-20)",
+    "USDC_TRX": "USD Coin (Tron TRC-20)",
 }
 
 TEST_SEED = (
@@ -113,18 +116,19 @@ async def safe_send_message(
     update: Update | None,
     text: str,
     context: ContextTypes.DEFAULT_TYPE | None = None,
+    chat_id: int | None = None,
 ):
     try:
         if update and getattr(update, "message", None):
             return await update.message.reply_text(text)
-        if context and update and getattr(update, "effective_chat", None):
-            return await context.bot.send_message(
-                chat_id=update.effective_chat.id, text=text
-            )
+        cid = chat_id
+        if cid is None and update and getattr(update, "effective_chat", None):
+            cid = update.effective_chat.id
+        if context and cid is not None:
+            return await context.bot.send_message(chat_id=cid, text=text)
     except telegram.error.RetryAfter as e:
         await asyncio.sleep(e.retry_after)
-        if update and getattr(update, "message", None):
-            return await update.message.reply_text(text)
+        return await safe_send_message(update, text, context, chat_id)
     except Exception as e:
         logger.exception(f"Erro ao enviar mensagem: {e}")
     return None
@@ -155,7 +159,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🚀 Super Checker Bot pronto!\n\n"
         "1) Envie texto ou .txt\n"
         "2) Use /check\n\n"
-        "Redes: BTC · ETH · USDT-ERC20 · SOL · TRX · USDT-TRC20\n"
+        "Prioridade: TRON (TRX + TRC-20 USDT)\n"
+        "Também: BTC · ETH · SOL\n"
         "Comandos: /start /check /clear /test",
         context,
     )
@@ -172,9 +177,7 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
         return
     status = await safe_send_message(
-        update,
-        "🧪 Testando checker com seed pública BIP39...",
-        context,
+        update, "🧪 Testando checker (seed pública BIP39)...", context
     )
     try:
         res = await check_balance_master("SEED", TEST_SEED)
@@ -187,12 +190,136 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         else:
             await safe_edit_message(
-                status,
-                "⚠️ Checker rodou sem saldo na seed de teste (RPC?). Tente de novo.",
+                status, "⚠️ Checker rodou sem saldo na seed de teste (RPC?)."
             )
     except Exception as e:
         logger.exception("test_cmd failed")
         await safe_edit_message(status, f"❌ Erro no teste: {e}")
+
+
+async def _run_check_job(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+    full_text: str,
+    status_msg,
+):
+    """Trabalho pesado fora do handler do webhook (evita timeout do Telegram)."""
+    try:
+        extractor = SeedExtractor()
+        stats = await asyncio.to_thread(extractor.extract_with_stats, full_text)
+        seeds = stats.valid
+
+        if not seeds:
+            fail_n = len(stats.failed_checksum)
+            extra = ""
+            if fail_n:
+                sample = stats.failed_checksum[0].split()
+                preview = " ".join(sample[:3]) + " ... " + " ".join(sample[-3:])
+                extra = (
+                    f"\n\n⚠️ {fail_n} frase(s) com palavras BIP39 mas checksum INVÁLIDO.\n"
+                    f"Ex.: {preview}\n"
+                    f"Não é seed BIP39 válida (palavra errada / Electrum / outra wordlist)."
+                )
+            await safe_edit_message(
+                status_msg,
+                f"⚠️ Nenhuma seed BIP39 válida.\n"
+                f"Palavras: {stats.total_words} | Janelas: {stats.windows_scanned}"
+                f"{extra}",
+            )
+            return
+
+        total = len(seeds)
+        diag = f"✅ {total} seed(s) BIP39 válida(s)"
+        if stats.failed_checksum:
+            diag += f"\n⚠️ {len(stats.failed_checksum)} checksum inválido (ignoradas)"
+        await safe_edit_message(
+            status_msg,
+            diag + "\n🔄 Checando TRON/TRC-20 prioritário (em background)...",
+        )
+
+        sem = asyncio.Semaphore(SEED_WORKERS)
+        found_count = 0
+        zero_count = 0
+        error_count = 0
+        checked = 0
+        zero_samples: list[str] = []
+        lock = asyncio.Lock()
+
+        async def process_one(seed: str):
+            nonlocal found_count, zero_count, error_count, checked
+            async with sem:
+                try:
+                    res = await check_balance_master("SEED", seed)
+                    if res:
+                        v, balances = res
+                        msg = format_found_message("SEED", v, balances)
+                        await context.bot.send_message(chat_id=chat_id, text=msg)
+                        try:
+                            storage.mark_alerted("SEED", v)
+                        except Exception:
+                            pass
+                        async with lock:
+                            found_count += 1
+                    else:
+                        async with lock:
+                            zero_count += 1
+                            if len(zero_samples) < 5:
+                                try:
+                                    addrs = preview_addresses(seed)
+                                    words = seed.split()
+                                    prev = (
+                                        " ".join(words[:2])
+                                        + "…"
+                                        + " ".join(words[-2:])
+                                    )
+                                    zero_samples.append(
+                                        f"• {prev}\n"
+                                        f"  TRX `{addrs.get('trx', '?')}`\n"
+                                        f"  ETH `{addrs.get('eth', '?')}`"
+                                    )
+                                except Exception:
+                                    pass
+                except Exception as e:
+                    logger.exception(f"Erro seed: {e}")
+                    async with lock:
+                        error_count += 1
+                finally:
+                    async with lock:
+                        checked += 1
+                        if checked % 3 == 0 or checked == total:
+                            await safe_edit_message(
+                                status_msg,
+                                f"⏳ {checked}/{total} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}",
+                            )
+
+        await asyncio.gather(*(process_one(s) for s in seeds))
+
+        summary = (
+            f"✅ Concluído\n"
+            f"• Seeds BIP39 válidas: {total}\n"
+            f"• Com saldo: {found_count}\n"
+            f"• Sem saldo (path padrão): {zero_count}\n"
+            f"• Erros: {error_count}"
+        )
+        if zero_samples:
+            summary += (
+                "\n\n🔎 TRX path0 das seeds sem saldo:\n"
+                + "\n".join(zero_samples)
+                + "\n\nAbra o TRX no tronscan.org e compare com a carteira.\n"
+                "Se for outro endereço = path/passphrase diferente."
+            )
+        await safe_edit_message(status_msg, summary)
+    except Exception:
+        logger.exception("_run_check_job failed")
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id, text="❌ Erro interno durante o check. Veja os logs."
+            )
+        except Exception:
+            pass
+    finally:
+        _running_checks.discard(user_id)
 
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -200,6 +327,14 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    if user_id in _running_checks:
+        await safe_send_message(
+            update, "⏳ Já existe um /check em andamento. Aguarde terminar.", context
+        )
+        return
+
     pool = user_pools.get(user_id, [])
     if not pool:
         await safe_send_message(
@@ -208,126 +343,21 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     full_text = " ".join(pool)
-    total_chars = len(full_text)
-    logger.info(f"🔍 Extração — {total_chars} chars")
+    # limpa pool já — job usa a cópia full_text
+    user_pools[user_id] = []
+
     status_msg = await safe_send_message(
         update,
-        f"🔍 Extraindo seeds ({total_chars} caracteres)...",
+        f"🔍 Recebido ({len(full_text)} caracteres).\n"
+        f"Processando em background (webhook não trava)...",
         context,
     )
 
-    extractor = SeedExtractor()
-    try:
-        stats = await asyncio.to_thread(extractor.extract_with_stats, full_text)
-        seeds = stats.valid
-    except Exception as e:
-        logger.exception("Falha na extração")
-        await safe_edit_message(status_msg, f"❌ Erro na extração: {e}")
-        return
-
-    if not seeds:
-        fail_n = len(stats.failed_checksum)
-        extra = ""
-        if fail_n:
-            sample = stats.failed_checksum[0].split()
-            preview = " ".join(sample[:3]) + " ... " + " ".join(sample[-3:])
-            extra = (
-                f"\n\n⚠️ {fail_n} frase(s) com palavras BIP39 mas checksum INVÁLIDO.\n"
-                f"Exemplo: {preview}\n"
-                f"Isso NÃO é seed válida — palavra errada ou não-BIP39 (ex: Electrum)."
-            )
-        await safe_edit_message(
-            status_msg,
-            f"⚠️ Nenhuma seed BIP39 válida.\n"
-            f"Palavras no texto: {stats.total_words}\n"
-            f"Janelas analisadas: {stats.windows_scanned}"
-            f"{extra}\n\n"
-            f"O bot não ignora de propósito: só aceita 12/15/18/21/24 palavras\n"
-            f"com checksum BIP39 inglês correto.",
-        )
-        user_pools[user_id] = []
-        return
-
-    total = len(seeds)
-    logger.info(f"✅ {total} seed(s) — workers={SEED_WORKERS}")
-    diag = f"✅ {total} seed(s) BIP39 válida(s)"
-    if stats.failed_checksum:
-        diag += f"\n⚠️ {len(stats.failed_checksum)} com checksum inválido (ignoradas)"
-    await safe_edit_message(
-        status_msg,
-        diag + "\nChecando BTC/ETH/USDT/SOL/TRX...",
+    _running_checks.add(user_id)
+    # importa: não await — libera o webhook imediatamente
+    context.application.create_task(
+        _run_check_job(context, chat_id, user_id, full_text, status_msg)
     )
-
-    sem = asyncio.Semaphore(SEED_WORKERS)
-    found_count = 0
-    zero_count = 0
-    error_count = 0
-    checked = 0
-    zero_samples: list[str] = []
-    lock = asyncio.Lock()
-
-    async def process_one(seed: str):
-        nonlocal found_count, zero_count, error_count, checked
-        async with sem:
-            try:
-                res = await check_balance_master("SEED", seed)
-                if res:
-                    v, balances = res
-                    msg = format_found_message("SEED", v, balances)
-                    await safe_send_message(update, msg, context)
-                    try:
-                        storage.mark_alerted("SEED", v)
-                    except Exception:
-                        pass
-                    async with lock:
-                        found_count += 1
-                else:
-                    async with lock:
-                        zero_count += 1
-                        if len(zero_samples) < 3:
-                            try:
-                                addrs = preview_addresses(seed)
-                                words = seed.split()
-                                prev = " ".join(words[:2]) + "…" + " ".join(words[-2:])
-                                zero_samples.append(
-                                    f"• {prev}\n"
-                                    f"  ETH `{addrs.get('eth','?')}`\n"
-                                    f"  SOL `{addrs.get('sol','?')}`\n"
-                                    f"  TRX `{addrs.get('trx','?')}`"
-                                )
-                            except Exception:
-                                pass
-            except Exception as e:
-                logger.exception(f"Erro seed: {e}")
-                async with lock:
-                    error_count += 1
-            finally:
-                async with lock:
-                    checked += 1
-                    if checked % 5 == 0 or checked == total:
-                        await safe_edit_message(
-                            status_msg,
-                            f"⏳ {checked}/{total} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}",
-                        )
-
-    await asyncio.gather(*(process_one(s) for s in seeds))
-
-    summary = (
-        f"✅ Concluído\n"
-        f"• Seeds BIP39 válidas: {total}\n"
-        f"• Com saldo: {found_count}\n"
-        f"• Sem saldo (path padrão): {zero_count}\n"
-        f"• Erros de rede: {error_count}"
-    )
-    if zero_samples:
-        summary += (
-            "\n\n🔎 Endereços derivados (path 0) das seeds sem saldo:\n"
-            + "\n".join(zero_samples)
-            + "\n\nConfira esses endereços no explorer. Se o saldo da carteira\n"
-            "estiver em OUTRO endereço, é path/rede diferente (BSC, passphrase, etc)."
-        )
-    await safe_edit_message(status_msg, summary)
-    user_pools[user_id] = []
 
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
