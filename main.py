@@ -3,11 +3,14 @@ import hashlib
 import logging
 import asyncio
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 # Carrega .env se existir (local / alguns hosts)
 try:
     from dotenv import load_dotenv
+
     load_dotenv(Path(__file__).resolve().parent / ".env")
 except ImportError:
     pass
@@ -51,6 +54,30 @@ user_pools: dict[int, list[str]] = {}
 
 TELEGRAM_MAX_CHARS = 4096
 SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "6")))
+
+
+# ---------------------------------------------------------------------------
+# Health check HTTP server (Render free Web Service exige porta aberta)
+# ---------------------------------------------------------------------------
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, format, *args):
+        # silencia logs de health check no terminal
+        return
+
+
+def start_health_server() -> None:
+    """Sobe servidor HTTP mínimo na PORT do Render (default 10000)."""
+    port = int(os.getenv("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    logger.info(f"Health check ouvindo em 0.0.0.0:{port}")
 
 
 def format_seed_display(item_type: str, value: str, show_full: bool = False) -> str:
@@ -162,7 +189,9 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user_id = update.effective_user.id
     pool = user_pools.get(user_id, [])
     if not pool:
-        await safe_send_message(update, "❌ Nada para verificar. Envie texto ou .txt primeiro.", context)
+        await safe_send_message(
+            update, "❌ Nada para verificar. Envie texto ou .txt primeiro.", context
+        )
         return
 
     full_text = " ".join(pool)
@@ -174,7 +203,6 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         context,
     )
 
-    # Extração em thread para não bloquear o event loop
     extractor = SeedExtractor()
     try:
         seeds = await asyncio.to_thread(extractor.extract_all, full_text)
@@ -229,7 +257,6 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             finally:
                 async with lock:
                     checked += 1
-                    # atualiza status a cada 10 ou no final
                     if checked % 10 == 0 or checked == total:
                         try:
                             await safe_edit_message(
@@ -260,9 +287,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = ""
 
     if update.message.document:
-        status = await safe_send_message(
-            update, "⏳ Lendo arquivo...", context
-        )
+        status = await safe_send_message(update, "⏳ Lendo arquivo...", context)
         try:
             file = await context.bot.get_file(update.message.document.file_id)
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -289,6 +314,9 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 def main():
+    # Render (Web Service) precisa de algo ouvindo na PORT — senão o deploy falha
+    start_health_server()
+
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("clear", clear_pool))
