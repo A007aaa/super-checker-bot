@@ -2,7 +2,6 @@ import asyncio
 import aiohttp
 import logging
 import os
-import math
 import random
 import json
 from bip_utils import (
@@ -32,6 +31,16 @@ PROVIDERS = {
 # Concurrency controls
 GLOBAL_SEMAPHORE = asyncio.Semaphore(CHECK_CONCURRENCY)
 PROVIDER_SEMAPHORES = {k: asyncio.Semaphore(PER_PROVIDER_LIMIT) for k in PROVIDERS}
+
+# module-level session reused to reduce connection overhead
+_global_session = None
+
+
+def _ensure_session():
+    global _global_session
+    if _global_session is None or getattr(_global_session, 'closed', False):
+        _global_session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=CHECK_CONCURRENCY))
+    return _global_session
 
 
 async def _fetch_with_retries(session, method: str, url: str, provider: str = None, **kwargs):
@@ -222,7 +231,8 @@ async def check_seed_params(session, seed: str, accounts: int = 1, indexes: int 
     """
     found = []
     try:
-        seed_bytes = Bip39SeedGenerator(seed).Generate()
+        # derivation is CPU-bound; run in thread to avoid blocking event loop
+        seed_bytes = await asyncio.to_thread(lambda: Bip39SeedGenerator(seed).Generate())
     except Exception as e:
         logger.error(f"   ❌ Erro na derivacao da seed: {e}")
         return None
@@ -231,36 +241,42 @@ async def check_seed_params(session, seed: str, accounts: int = 1, indexes: int 
     for acct in range(max(1, accounts)):
         for idx in range(max(1, indexes)):
             try:
-                # derive addresses
-                b84 = Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN).Purpose().Coin().Account(acct).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx)
-                btc_sgw = b84.PublicKey().ToAddress()
-                b44_btc = Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN).Purpose().Coin().Account(acct).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx)
-                btc_leg = b44_btc.PublicKey().ToAddress()
-                eth = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(acct).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx)
-                eth_addr = eth.PublicKey().ToAddress()
-                sol = Bip44.FromSeed(seed_bytes, Bip84Coins.SOLANA) if False else Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA)
-                # Note: bip_utils has variations for Solana; above line keeps previous behavior
-                sol = Bip44.FromSeed(seed_bytes, Bip44Coins.SOLANA).Purpose().Coin().Account(acct).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx)
-                sol_addr = sol.PublicKey().ToAddress()
-                trx = Bip44.FromSeed(seed_bytes, Bip44Coins.TRON).Purpose().Coin().Account(acct).Change(Bip44Changes.CHAIN_EXT).AddressIndex(idx)
-                trx_addr = trx.PublicKey().ToAddress()
+                # derive addresses in thread to avoid blocking
+                def derive_index(sb, a, i):
+                    b84 = Bip84.FromSeed(sb, Bip84Coins.BITCOIN).Purpose().Coin().Account(a).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i)
+                    btc_sgw = b84.PublicKey().ToAddress()
+                    b44_btc = Bip44.FromSeed(sb, Bip44Coins.BITCOIN).Purpose().Coin().Account(a).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i)
+                    btc_leg = b44_btc.PublicKey().ToAddress()
+                    eth = Bip44.FromSeed(sb, Bip44Coins.ETHEREUM).Purpose().Coin().Account(a).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i)
+                    eth_addr = eth.PublicKey().ToAddress()
+                    sol = Bip44.FromSeed(sb, Bip44Coins.SOLANA).Purpose().Coin().Account(a).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i)
+                    sol_addr = sol.PublicKey().ToAddress()
+                    trx = Bip44.FromSeed(sb, Bip44Coins.TRON).Purpose().Coin().Account(a).Change(Bip44Changes.CHAIN_EXT).AddressIndex(i)
+                    trx_addr = trx.PublicKey().ToAddress()
+                    return btc_sgw, btc_leg, eth_addr, sol_addr, trx_addr
 
-                # Check in order of likely value (ETH then BTC then SOL/TRX)
-                r_eth = await check_eth_usdt(session, eth_addr)
-                if r_eth:
-                    found.extend(r_eth)
-                r_btc = await check_btc(session, btc_sgw)
-                if r_btc:
-                    found.extend(r_btc)
-                r_btc2 = await check_btc(session, btc_leg)
-                if r_btc2:
-                    found.extend(r_btc2)
-                r_sol = await check_sol(session, sol_addr)
-                if r_sol:
-                    found.extend(r_sol)
-                r_trx = await check_tron_usdt(session, trx_addr)
-                if r_trx:
-                    found.extend(r_trx)
+                btc_sgw, btc_leg, eth_addr, sol_addr, trx_addr = await asyncio.to_thread(derive_index, seed_bytes, acct, idx)
+
+                # run provider checks in parallel per-index (they each use provider semaphores internally)
+                tasks = [
+                    asyncio.create_task(check_eth_usdt(session, eth_addr)),
+                    asyncio.create_task(check_btc(session, btc_sgw)),
+                    asyncio.create_task(check_btc(session, btc_leg)),
+                    asyncio.create_task(check_sol(session, sol_addr)),
+                    asyncio.create_task(check_tron_usdt(session, trx_addr)),
+                ]
+
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for res in results:
+                    if isinstance(res, Exception):
+                        logger.debug(f"   ⚠️ Provider check exception: {res}")
+                        continue
+                    if res:
+                        # res can be tuple of results
+                        if isinstance(res, tuple):
+                            found.extend(res)
+                        else:
+                            found.append(res)
 
                 if found and early_stop:
                     logger.info(f"   ✅ Encontrado saldo em seed (acct={acct} idx={idx}) - interrompendo early_stop")
@@ -278,32 +294,33 @@ async def check_seed_params(session, seed: str, accounts: int = 1, indexes: int 
 # Backwards-compatible check_balance_master (keeps previous behaviour but uses streaming under the hood)
 async def check_balance_master(type, value):
     logger.info(f"🔍 Iniciando verificação: tipo={type}")
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=CHECK_CONCURRENCY)) as session:
-        if type == 'SEED':
-            # use defaults from env/config
-            return await check_seed_params(session, value, SCAN_ACCOUNTS, SCAN_ADDRESSES, early_stop=True)
+    # reuse a global session to reduce connection overhead
+    session = _ensure_session()
+    if type == 'SEED':
+        # use defaults from env/config
+        return await check_seed_params(session, value, SCAN_ACCOUNTS, SCAN_ADDRESSES, early_stop=True)
 
-        # other types (keys/addresses) keep original behaviour
-        if type == "KEY_SOL":
-            return await check_sol(session, value)
-        if type == "KEY_HEX":
-            addr = value if value.startswith("0x") else f"0x{value}"
-            return await check_eth_usdt(session, addr)
-        if type == "ADDR_ETH":
-            return await check_eth_usdt(session, value)
-        if type == "ADDR_BTC":
-            return await check_btc(session, value)
-        if type == "ADDR_TRON":
-            return await check_tron_usdt(session, value)
-        if type == "ADDR_SOL":
-            return await check_sol(session, value)
+    # other types (keys/addresses) keep original behaviour
+    if type == "KEY_SOL":
+        return await check_sol(session, value)
+    if type == "KEY_HEX":
+        addr = value if value.startswith("0x") else f"0x{value}"
+        return await check_eth_usdt(session, addr)
+    if type == "ADDR_ETH":
+        return await check_eth_usdt(session, value)
+    if type == "ADDR_BTC":
+        return await check_btc(session, value)
+    if type == "ADDR_TRON":
+        return await check_tron_usdt(session, value)
+    if type == "ADDR_SOL":
+        return await check_sol(session, value)
 
-        # fallback: detect by prefix
+    # fallback: detect by prefix
+    if isinstance(value, str):
         if value.startswith("0x") and len(value) == 42:
             return await check_eth_usdt(session, value)
         elif value.startswith("T") and len(value) == 34:
             return await check_tron_usdt(session, value)
         elif value.startswith("bc1") or value.startswith(("1", "3")):
             return await check_btc(session, value)
-        else:
-            return await check_sol(session, value)
+    return await check_sol(session, value)
