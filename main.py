@@ -18,9 +18,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configurações do Bot
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8785377732:AAFDwUBm7rDkFa_ZMSk0szz2L3DzQUqBiY8")
-ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "8422682029"))
+# Configurações do Bot — NUNCA hardcode token em produção
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError(
+        "TELEGRAM_BOT_TOKEN não definido. Configure a variável de ambiente ou o arquivo .env"
+    )
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 
 # initialize storage (SQLite) for persisted alerts
 try:
@@ -83,6 +87,8 @@ def format_found_message(item_type: str, value: str, balances: list) -> str:
 async def is_authorized(update: Update) -> bool:
     if not update or not update.effective_user:
         return False
+    if ALLOWED_USER_ID == 0:
+        return True  # sem restrição se não configurado
     return update.effective_user.id == ALLOWED_USER_ID
 
 
