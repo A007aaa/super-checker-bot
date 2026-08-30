@@ -48,9 +48,8 @@ except Exception as e:
 user_pools: dict[int, list[str]] = {}
 
 TELEGRAM_MAX_CHARS = 4096
-SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "6")))
+SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "4")))
 
-# Railway injeta RAILWAY_PUBLIC_DOMAIN quando há domínio público
 RAILWAY_DOMAIN = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip(";")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"telegram/{secrets.token_hex(8)}")
 PORT = int(os.getenv("PORT", "8080"))
@@ -77,11 +76,13 @@ def format_seed_display(item_type: str, value: str, show_full: bool = False) -> 
 
 def format_found_message(item_type: str, value: str, balances: list) -> str:
     seed_line = format_seed_display(item_type, value, show_full=False)
-    balance_lines = "\n".join(f"• {coin}: {bal}" for coin, _addr, bal in balances)
+    balance_lines = "\n".join(
+        f"• {coin}: {bal}\n  `{addr}`" for coin, addr, bal in balances
+    )
     msg = (
         f"🎯 SALDO ENCONTRADO!\n\n"
         f"{seed_line}\n\n"
-        f"💰 Saldos encontrados:\n"
+        f"💰 Saldos:\n"
         f"{balance_lines}"
     )
     if len(msg) > TELEGRAM_MAX_CHARS:
@@ -127,15 +128,13 @@ async def safe_edit_message(message, text: str):
         return await message.edit_text(text)
     except telegram.error.RetryAfter as e:
         if e.retry_after > 60:
-            logger.error(f"Flood control excessivo ({e.retry_after}s). Pulando edição.")
             return message
         await asyncio.sleep(e.retry_after)
         try:
             return await message.edit_text(text)
         except Exception:
             return message
-    except Exception as e:
-        logger.exception(f"Erro ao editar mensagem: {e}")
+    except Exception:
         return message
 
 
@@ -145,7 +144,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_send_message(
         update,
         "🚀 Super Checker Bot pronto!\n"
-        "Envie texto ou arquivos .txt e use /check para verificar.\n"
+        "Envie texto/arquivo .txt e use /check.\n"
+        "Cadeias: BTC, ETH+USDT, SOL, TRX+USDT.\n"
         "Comandos: /start /check /clear",
         context,
     )
@@ -172,10 +172,10 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     full_text = " ".join(pool)
     total_chars = len(full_text)
-    logger.info(f"🔍 Extração iniciada — {total_chars} caracteres")
+    logger.info(f"🔍 Extração — {total_chars} chars")
     status_msg = await safe_send_message(
         update,
-        f"🔍 Extraindo seeds do texto ({total_chars} caracteres)...",
+        f"🔍 Extraindo seeds ({total_chars} caracteres)...",
         context,
     )
 
@@ -183,72 +183,76 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         seeds = await asyncio.to_thread(extractor.extract_all, full_text)
     except Exception as e:
-        logger.exception("Falha na extração de seeds")
+        logger.exception("Falha na extração")
         await safe_edit_message(status_msg, f"❌ Erro na extração: {e}")
         return
 
     if not seeds:
         await safe_edit_message(
             status_msg,
-            "⚠️ Nenhuma seed BIP39 válida encontrada no texto.\n"
-            "Confira se as palavras estão corretas e juntas (12/15/18/21/24 palavras).",
+            "⚠️ Nenhuma seed BIP39 válida encontrada.\n"
+            "Precisa de 12/15/18/21/24 palavras com checksum correto.",
         )
         user_pools[user_id] = []
         return
 
     total = len(seeds)
-    logger.info(f"✅ {total} seed(s) válida(s) extraída(s)")
+    logger.info(f"✅ {total} seed(s) válida(s)")
     await safe_edit_message(
         status_msg,
-        f"✅ {total} seed(s) válida(s). Verificando saldos com {SEED_WORKERS} workers...",
+        f"✅ {total} seed(s) válida(s).\n"
+        f"Verificando BTC/ETH/SOL/TRX (pode demorar)...",
     )
 
     sem = asyncio.Semaphore(SEED_WORKERS)
     found_count = 0
+    zero_count = 0
+    error_count = 0
     checked = 0
     lock = asyncio.Lock()
 
     async def process_one(seed: str):
-        nonlocal found_count, checked
+        nonlocal found_count, zero_count, error_count, checked
         async with sem:
             try:
                 res = await check_balance_master("SEED", seed)
                 if res:
                     v, balances = res
+                    # Sempre notifica quando há saldo (mesmo se já alertado antes)
+                    msg = format_found_message("SEED", v, balances)
+                    await safe_send_message(update, msg, context)
                     try:
-                        already = storage.is_alerted("SEED", v)
+                        storage.mark_alerted("SEED", v)
                     except Exception:
-                        already = False
-                    if not already:
-                        msg = format_found_message("SEED", v, balances)
-                        await safe_send_message(update, msg, context)
-                        try:
-                            storage.mark_alerted("SEED", v)
-                        except Exception:
-                            logger.exception("Erro ao marcar alert")
-                        async with lock:
-                            found_count += 1
+                        pass
+                    async with lock:
+                        found_count += 1
+                else:
+                    async with lock:
+                        zero_count += 1
             except Exception as e:
                 logger.exception(f"Erro ao processar seed: {e}")
+                async with lock:
+                    error_count += 1
             finally:
                 async with lock:
                     checked += 1
-                    if checked % 10 == 0 or checked == total:
-                        try:
-                            await safe_edit_message(
-                                status_msg,
-                                f"⏳ Progresso: {checked}/{total} | Saldos encontrados: {found_count}",
-                            )
-                        except Exception:
-                            pass
+                    if checked % 5 == 0 or checked == total:
+                        await safe_edit_message(
+                            status_msg,
+                            f"⏳ {checked}/{total} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}",
+                        )
 
     await asyncio.gather(*(process_one(s) for s in seeds))
 
     await safe_edit_message(
         status_msg,
-        f"✅ Concluído.\n"
-        f"• Seeds verificadas: {total}\n"
-        f"• Com saldo: {found_count}",
+        f"✅ Concluído\n"
+        f"• Seeds válidas: {total}\n"
+        f"• Com saldo: {found_count}\n"
+        f"• Sem saldo (nos caminhos varidos): {zero_count}\n"
+        f"• Erros: {error_count}\n\n"
+        f"Obs: só BTC/ETH(+USDT)/SOL/TRX(+USDT), paths BIP44/84 padrão.",
     )
     user_pools[user_id] = []
 
@@ -276,7 +280,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 pass
             await safe_edit_message(
                 status,
-                f"✅ Arquivo de {len(text)} caracteres lido. Use /check para processar.",
+                f"✅ Arquivo de {len(text)} caracteres. Use /check",
             )
         except Exception as e:
             await safe_edit_message(status, f"❌ Erro ao ler arquivo: {e}")
@@ -292,10 +296,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err = context.error
     if isinstance(err, telegram.error.Conflict):
-        logger.error(
-            "Conflict getUpdates: outra instância ainda usa este token. "
-            "Pare o serviço 'trade' se compartilhar o token, ou use webhook."
-        )
+        logger.error("Conflict: outra instância usa este token.")
         return
     logger.exception("Exception while handling update", exc_info=err)
 
@@ -318,7 +319,6 @@ def build_app() -> Application:
 def main():
     application = build_app()
 
-    # No Railway com domínio público → WEBHOOK (evita Conflict de polling)
     if RAILWAY_DOMAIN:
         webhook_url = f"https://{RAILWAY_DOMAIN}/{WEBHOOK_PATH}"
         logger.info(f"Modo WEBHOOK: {webhook_url}")
@@ -331,7 +331,6 @@ def main():
             allowed_updates=Update.ALL_TYPES,
         )
     else:
-        # Local / sem domínio → polling
         logger.info("Modo POLLING (sem RAILWAY_PUBLIC_DOMAIN)")
 
         async def _clear_webhook(app: Application) -> None:
