@@ -15,15 +15,17 @@ from bip_utils import (
 
 logger = logging.getLogger(__name__)
 
-CHECK_CONCURRENCY = int(os.getenv("CHECK_CONCURRENCY", "40"))
-PER_PROVIDER_LIMIT = int(os.getenv("PER_PROVIDER_LIMIT", "15"))
-SCAN_ADDRESSES = int(os.getenv("SCAN_ADDRESSES", "25"))
-SCAN_ACCOUNTS = int(os.getenv("SCAN_ACCOUNTS", "2"))
-CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", "25"))
+CHECK_CONCURRENCY = int(os.getenv("CHECK_CONCURRENCY", "100"))
+PER_PROVIDER_LIMIT = int(os.getenv("PER_PROVIDER_LIMIT", "30"))
+# ~500 combos: accounts * indexes * 2 (ext+int)
+SCAN_ADDRESSES = int(os.getenv("SCAN_ADDRESSES", "50"))
+SCAN_ACCOUNTS = int(os.getenv("SCAN_ACCOUNTS", "5"))
+CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", "20"))
 CHECK_RETRIES = int(os.getenv("CHECK_RETRIES", "2"))
-RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.5"))
-# se True, para no primeiro saldo; False = varre todos os índices
+RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.4"))
 EARLY_STOP = os.getenv("EARLY_STOP", "true").lower() in ("1", "true", "yes")
+# quantas checagens de rede em paralelo por seed
+ADDR_PARALLEL = int(os.getenv("ADDR_PARALLEL", "40"))
 
 PROVIDERS = {
     "eth": [os.getenv("ETH_RPC", "https://cloudflare-eth.com/")],
@@ -35,7 +37,7 @@ PROVIDERS = {
 PROVIDER_SEMAPHORES = {k: asyncio.Semaphore(PER_PROVIDER_LIMIT) for k in PROVIDERS}
 
 
-async def _fetch_with_retries(session, method: str, url: str, provider: str = None, **kwargs):
+async def _fetch_with_retries(session, method: str, url: str, **kwargs):
     last_exc = None
     for attempt in range(1, CHECK_RETRIES + 2):
         try:
@@ -46,20 +48,11 @@ async def _fetch_with_retries(session, method: str, url: str, provider: str = No
                 except Exception:
                     text = None
                 return res.status, text
-        except asyncio.TimeoutError as e:
-            logger.warning(f"   ⏱️ Timeout {method} {url} attempt {attempt}")
-            last_exc = e
-        except aiohttp.ClientError as e:
-            logger.warning(f"   ⚠️ HTTP error {method} {url}: {e}")
-            last_exc = e
         except Exception as e:
-            logger.error(f"   ❌ Unexpected {method} {url}: {e}")
             last_exc = e
-
-        if attempt <= CHECK_RETRIES + 1:
-            backoff = (RETRY_BACKOFF_BASE ** (attempt - 1)) * (0.5 + random.random() * 0.5)
-            await asyncio.sleep(backoff)
-
+            if attempt <= CHECK_RETRIES + 1:
+                backoff = (RETRY_BACKOFF_BASE ** (attempt - 1)) * (0.4 + random.random() * 0.4)
+                await asyncio.sleep(backoff)
     raise last_exc
 
 
@@ -70,16 +63,14 @@ async def check_sol(session, addr):
             status, text = await _fetch_with_retries(
                 session, "POST", PROVIDERS["sol"][0], json=payload
             )
-            if status == 200:
-                data = json.loads(text) if text else {}
+            if status == 200 and text:
+                data = json.loads(text)
                 bal = data.get("result", {}).get("value", 0) / 10**9
                 if bal > 0:
-                    logger.info(f"   💰 [SOL] {bal} em {addr}")
+                    logger.info(f"   💰 [SOL] {bal} @ {addr}")
                     return (("SOL", addr, bal),)
-            else:
-                logger.debug(f"   ⚠️ [SOL] status {status}")
         except Exception as e:
-            logger.error(f"   ❌ [SOL] {addr}: {e}")
+            logger.debug(f"   ❌ [SOL] {e}")
     return ()
 
 
@@ -96,32 +87,32 @@ async def check_eth_usdt(session, addr):
             status, text = await _fetch_with_retries(
                 session, "POST", PROVIDERS["eth"][0], json=payload
             )
-            if status == 200:
-                data = json.loads(text) if text else {}
+            if status == 200 and text:
+                data = json.loads(text)
                 bal = int(data.get("result", "0x0"), 16) / 10**18
                 if bal > 0:
-                    logger.info(f"   💰 [ETH] {bal} em {addr}")
+                    logger.info(f"   💰 [ETH] {bal} @ {addr}")
                     results.append(("ETH", addr, bal))
 
-            usdt_contract = "0xdac17f958d2ee523a2206206994597c13d831ec7"
+            usdt = "0xdac17f958d2ee523a2206206994597c13d831ec7"
             data_call = "0x70a08231" + addr[2:].lower().zfill(64)
             payload_u = {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "eth_call",
-                "params": [{"to": usdt_contract, "data": data_call}, "latest"],
+                "params": [{"to": usdt, "data": data_call}, "latest"],
             }
             status_u, text_u = await _fetch_with_retries(
                 session, "POST", PROVIDERS["eth"][0], json=payload_u
             )
-            if status_u == 200:
-                data = json.loads(text_u) if text_u else {}
+            if status_u == 200 and text_u:
+                data = json.loads(text_u)
                 u_bal = int(data.get("result", "0x0"), 16) / 10**6
                 if u_bal > 0:
-                    logger.info(f"   💰 [USDT_ETH] {u_bal} em {addr}")
+                    logger.info(f"   💰 [USDT_ETH] {u_bal} @ {addr}")
                     results.append(("USDT_ETH", addr, u_bal))
         except Exception as e:
-            logger.error(f"   ❌ [ETH/USDT] {addr}: {e}")
+            logger.debug(f"   ❌ [ETH] {e}")
         return tuple(results)
 
 
@@ -131,16 +122,16 @@ async def check_btc(session, addr):
             status, text = await _fetch_with_retries(
                 session, "GET", PROVIDERS["btc"][0] + addr
             )
-            if status == 200:
+            if status == 200 and text is not None:
                 try:
-                    bal = int(text) / 10**8
+                    bal = int(text.strip()) / 10**8
                 except Exception:
                     bal = 0
                 if bal > 0:
-                    logger.info(f"   💰 [BTC] {bal} em {addr}")
+                    logger.info(f"   💰 [BTC] {bal} @ {addr}")
                     return (("BTC", addr, bal),)
         except Exception as e:
-            logger.error(f"   ❌ [BTC] {addr}: {e}")
+            logger.debug(f"   ❌ [BTC] {e}")
     return ()
 
 
@@ -151,13 +142,13 @@ async def check_tron_usdt(session, addr):
             status, text = await _fetch_with_retries(
                 session, "GET", PROVIDERS["tron"][0] + addr
             )
-            if status == 200:
-                data = json.loads(text) if text else {}
+            if status == 200 and text:
+                data = json.loads(text)
                 if data.get("data"):
                     acc = data["data"][0]
                     trx_bal = acc.get("balance", 0) / 10**6
                     if trx_bal > 0:
-                        logger.info(f"   💰 [TRX] {trx_bal} em {addr}")
+                        logger.info(f"   💰 [TRX] {trx_bal} @ {addr}")
                         results.append(("TRX", addr, trx_bal))
                     for token in acc.get("trc20", []):
                         try:
@@ -171,17 +162,16 @@ async def check_tron_usdt(session, addr):
                                             u_bal = float(v) / 10**6
                                             break
                             if u_bal and u_bal > 0:
-                                logger.info(f"   💰 [USDT_TRX] {u_bal} em {addr}")
+                                logger.info(f"   💰 [USDT_TRX] {u_bal} @ {addr}")
                                 results.append(("USDT_TRX", addr, u_bal))
                         except Exception:
                             continue
         except Exception as e:
-            logger.error(f"   ❌ [TRX] {addr}: {e}")
+            logger.debug(f"   ❌ [TRX] {e}")
         return tuple(results)
 
 
 def _derive_addrs(seed_bytes, acct: int, idx: int, change):
-    """Deriva BTC/ETH/SOL/TRX para um account/index/change."""
     b84 = (
         Bip84.FromSeed(seed_bytes, Bip84Coins.BITCOIN)
         .Purpose()
@@ -242,22 +232,28 @@ async def check_seed_params(
     indexes = indexes if indexes is not None else SCAN_ADDRESSES
     early_stop = EARLY_STOP if early_stop is None else early_stop
 
-    found = []
     try:
         seed_bytes = Bip39SeedGenerator(seed).Generate()
     except Exception as e:
-        logger.error(f"   ❌ Erro na derivação da seed: {e}")
+        logger.error(f"   ❌ Derivação: {e}")
         return None
 
-    # external + internal (change)
     changes = (Bip44Changes.CHAIN_EXT, Bip44Changes.CHAIN_INT)
+    total_combos = max(1, accounts) * max(1, indexes) * len(changes)
+    logger.info(
+        f"   📡 Varrendo ~{total_combos} combinações "
+        f"(acct={accounts} idx={indexes} ×2 change)"
+    )
+
+    # Monta lista de tarefas (addr checks)
+    tasks = []
+    meta = []  # (acct, idx, change_name)
 
     for acct in range(max(1, accounts)):
         for idx in range(max(1, indexes)):
             for change in changes:
                 try:
                     addrs = _derive_addrs(seed_bytes, acct, idx, change)
-
                     for checker, addr in (
                         (check_eth_usdt, addrs["eth"]),
                         (check_btc, addrs["btc_sgw"]),
@@ -265,22 +261,35 @@ async def check_seed_params(
                         (check_sol, addrs["sol"]),
                         (check_tron_usdt, addrs["trx"]),
                     ):
-                        r = await checker(session, addr)
-                        if r:
-                            found.extend(r)
-
-                    if found and early_stop:
-                        logger.info(
-                            f"   ✅ Saldo em acct={acct} idx={idx} change={change.name}"
-                        )
-                        return (seed, found)
+                        tasks.append(checker(session, addr))
+                        meta.append((acct, idx, change.name))
                 except Exception as e:
-                    logger.debug(f"   ⚠️ Falha acct={acct} idx={idx}: {e}")
-                    continue
+                    logger.debug(f"   ⚠️ derive fail {acct}/{idx}: {e}")
+
+    found = []
+    sem = asyncio.Semaphore(ADDR_PARALLEL)
+
+    async def _run(coro):
+        async with sem:
+            return await coro
+
+    # Processa em lotes para poder early-stop
+    batch_size = ADDR_PARALLEL
+    for i in range(0, len(tasks), batch_size):
+        batch = tasks[i : i + batch_size]
+        results = await asyncio.gather(*[_run(c) for c in batch], return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            if r:
+                found.extend(r)
+        if found and early_stop:
+            logger.info(f"   ✅ Saldo encontrado — early stop ({len(found)} hits)")
+            return (seed, found)
 
     if found:
         return (seed, found)
-    logger.info(f"   ⚪ Sem saldo nos caminhos varidos (accounts={accounts}, indexes={indexes})")
+    logger.info(f"   ⚪ Sem saldo em {total_combos} combinações de path")
     return None
 
 
