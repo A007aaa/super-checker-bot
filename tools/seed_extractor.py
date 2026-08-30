@@ -1,5 +1,5 @@
 import re
-from typing import Iterator
+from typing import Iterator, Optional
 from bip_utils import Bip39MnemonicValidator
 
 
@@ -24,7 +24,7 @@ class SeedExtractor:
         # lower-case and collapse whitespace
         return " ".join(s.strip().lower().split())
 
-    def extract_all_iter(self, text: str, max_seeds: int = None) -> Iterator[str]:
+    def extract_all_iter(self, text: str, max_seeds: Optional[int] = None) -> Iterator[str]:
         """
         Iterate over valid mnemonics found in `text`.
         This processes `text` in sliding chunks so it does not run expensive
@@ -43,7 +43,8 @@ class SeedExtractor:
             for m in self.CANDIDATE_RE.finditer(block):
                 cand = self._normalize(m.group(1))
                 try:
-                    if self.validator.Validate(cand):
+                    # IsValid returns bool; Validate() returns None on success and raises on failure
+                    if self.validator.IsValid(cand):
                         yield cand
                         found += 1
                         if max_seeds and found >= max_seeds:
@@ -62,7 +63,7 @@ class SeedExtractor:
         for m in self.CANDIDATE_RE.finditer(buffer):
             cand = self._normalize(m.group(1))
             try:
-                if self.validator.Validate(cand):
+                if self.validator.IsValid(cand):
                     yield cand
                     found += 1
                     if max_seeds and found >= max_seeds:
