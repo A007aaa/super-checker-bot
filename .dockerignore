@@ -1,0 +1,17 @@
+__pycache__
+*/__pycache__
+*.pyc
+*.pyo
+.git
+.gitignore
+.env
+.venv
+venv
+*.db
+alerts.db
+.pytest_cache
+tests
+benchmark
+PR_BODY.md
+render.yaml
+runtime.txt
