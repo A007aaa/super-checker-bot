@@ -9,9 +9,10 @@ from blockchain_checker import check_balance_master
 from seed_extractor import SeedExtractor
 
 # Configuração de Logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", 
-    level=logging.INFO
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=getattr(logging, LOG_LEVEL, logging.INFO)
 )
 logger = logging.getLogger(__name__)
 
