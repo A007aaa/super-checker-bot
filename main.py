@@ -7,6 +7,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from blockchain_checker import check_balance_master
 from seed_extractor import SeedExtractor
+import storage
 
 # Configuração de Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -21,6 +22,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8785377732:AAFDwUBm7rDkFa_
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "8422682029"))
 
 extractor = SeedExtractor()
+# initialize storage (SQLite) for persisted alerts
+try:
+    storage.init_db()
+except Exception as e:
+    logger.error(f"Failed to initialize storage: {e}")
+
 user_pools = {}
 
 TELEGRAM_MAX_CHARS = 4096
@@ -77,6 +84,7 @@ def format_found_message(item_type: str, value: str, balances: list) -> str:
         msg = msg[: TELEGRAM_MAX_CHARS - 3] + "..."
 
     return msg
+
 
 async def is_authorized(update: Update) -> bool:
     if not update or not update.effective_user: return False
@@ -158,15 +166,30 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         try:
             res = await check_balance_master(item_type, val)
             if res:
-                found_count += 1
                 v, balances = res
-                balance_summary = " | ".join(f"{coin}: {bal}" for coin, _addr, bal in balances)
-                logger.info(
-                    f"🎯 Saldo encontrado! [{i+1}/{total_items}] Tipo: {item_type} "
-                    f"| Redes: {len(balances)} | {balance_summary}"
-                )
-                msg = format_found_message(item_type, v, balances)
-                await safe_send_message(update, msg)
+                # check persistent storage to avoid duplicate alerts
+                try:
+                    already = storage.is_alerted(item_type, v)
+                except Exception as e:
+                    logger.error(f"Storage check error for item {i+1}: {e}")
+                    already = False
+
+                if already:
+                    logger.info(f"🔁 Item já alertado anteriormente: {item_type}")
+                else:
+                    found_count += 1
+                    balance_summary = " | ".join(f"{coin}: {bal}" for coin, _addr, bal in balances)
+                    logger.info(
+                        f"🎯 Saldo encontrado! [{i+1}/{total_items}] Tipo: {item_type} "
+                        f"| Redes: {len(balances)} | {balance_summary}"
+                    )
+                    msg = format_found_message(item_type, v, balances)
+                    await safe_send_message(update, msg)
+                    # persist alert
+                    try:
+                        storage.mark_alerted(item_type, v)
+                    except Exception as e:
+                        logger.error(f"Storage mark error for item {i+1}: {e}")
         except Exception as e:
             logger.error(f"Erro ao verificar item {i+1}/{total_items} ({item_type}): {e}")
 
