@@ -57,7 +57,7 @@ SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "6")))
 
 
 # ---------------------------------------------------------------------------
-# Health check HTTP server (Render free Web Service exige porta aberta)
+# Health check HTTP server (Railway / PaaS exige PORT aberta)
 # ---------------------------------------------------------------------------
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -67,13 +67,11 @@ class _HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"ok")
 
     def log_message(self, format, *args):
-        # silencia logs de health check no terminal
         return
 
 
 def start_health_server() -> None:
-    """Sobe servidor HTTP mínimo na PORT do Render (default 10000)."""
-    port = int(os.getenv("PORT", "10000"))
+    port = int(os.getenv("PORT", "8080"))
     server = HTTPServer(("0.0.0.0", port), _HealthHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -313,11 +311,24 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user_pools.setdefault(user_id, []).append(text)
 
 
+async def post_init(application: Application) -> None:
+    """Remove webhook e limpa updates pendentes antes do polling."""
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook removido (se existia). Usando apenas getUpdates.")
+    except Exception as e:
+        logger.warning(f"Não foi possível limpar webhook: {e}")
+
+
 def main():
-    # Render (Web Service) precisa de algo ouvindo na PORT — senão o deploy falha
     start_health_server()
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("clear", clear_pool))
     application.add_handler(CommandHandler("check", check_pool))
@@ -327,12 +338,23 @@ def main():
             handle_input,
         )
     )
-    logger.info("Bot iniciando polling...")
-    application.run_polling(drop_pending_updates=True)
+
+    logger.info("Bot iniciando polling (uma única instância)...")
+    # drop_pending_updates evita processar fila antiga após Conflict
+    application.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
 
 
 if __name__ == "__main__":
     try:
         main()
+    except telegram.error.Conflict:
+        logger.error(
+            "Conflict: outra instância está usando este token. "
+            "Pare o bot local, deixe só 1 deploy no Railway e redeploy."
+        )
+        raise
     except Exception:
         logger.exception("Unhandled exception in main loop")
