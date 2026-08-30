@@ -1,12 +1,14 @@
 services:
-  - type: worker
+  - type: web
     name: super-checker-bot
-    env: python
-    buildCommand: pip install -r requirements.txt
+    runtime: python
+    plan: free
+    buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
     startCommand: python main.py
+    healthCheckPath: /
     envVars:
       - key: PYTHON_VERSION
-        value: "3.11.9"
+        value: "3.11.11"
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: ALLOWED_USER_ID
