@@ -3,11 +3,9 @@ import hashlib
 import logging
 import asyncio
 import tempfile
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import secrets
 from pathlib import Path
 
-# Carrega .env se existir (local / alguns hosts)
 try:
     from dotenv import load_dotenv
 
@@ -22,7 +20,6 @@ from tools.seed_extractor import SeedExtractor
 import storage
 import telegram.error
 
-# Configuração de Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -30,11 +27,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configurações do Bot — NUNCA hardcode token
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError(
-        "TELEGRAM_BOT_TOKEN não definido. Configure a variável de ambiente ou o arquivo .env"
+        "TELEGRAM_BOT_TOKEN não definido. Configure a variável de ambiente."
     )
 
 _allowed_raw = os.getenv("ALLOWED_USER_ID", "0").strip() or "0"
@@ -44,7 +40,6 @@ except ValueError:
     ALLOWED_USER_ID = 0
     logger.warning("ALLOWED_USER_ID inválido; usando 0 (sem restrição)")
 
-# initialize storage (SQLite) for persisted alerts
 try:
     storage.init_db()
 except Exception as e:
@@ -55,27 +50,10 @@ user_pools: dict[int, list[str]] = {}
 TELEGRAM_MAX_CHARS = 4096
 SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "6")))
 
-
-# ---------------------------------------------------------------------------
-# Health check HTTP server (Railway / PaaS exige PORT aberta)
-# ---------------------------------------------------------------------------
-class _HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"ok")
-
-    def log_message(self, format, *args):
-        return
-
-
-def start_health_server() -> None:
-    port = int(os.getenv("PORT", "8080"))
-    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    logger.info(f"Health check ouvindo em 0.0.0.0:{port}")
+# Railway injeta RAILWAY_PUBLIC_DOMAIN quando há domínio público
+RAILWAY_DOMAIN = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip(";")
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"telegram/{secrets.token_hex(8)}")
+PORT = int(os.getenv("PORT", "8080"))
 
 
 def format_seed_display(item_type: str, value: str, show_full: bool = False) -> str:
@@ -311,24 +289,19 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user_pools.setdefault(user_id, []).append(text)
 
 
-async def post_init(application: Application) -> None:
-    """Remove webhook e limpa updates pendentes antes do polling."""
-    try:
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Webhook removido (se existia). Usando apenas getUpdates.")
-    except Exception as e:
-        logger.warning(f"Não foi possível limpar webhook: {e}")
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = context.error
+    if isinstance(err, telegram.error.Conflict):
+        logger.error(
+            "Conflict getUpdates: outra instância ainda usa este token. "
+            "Pare o serviço 'trade' se compartilhar o token, ou use webhook."
+        )
+        return
+    logger.exception("Exception while handling update", exc_info=err)
 
 
-def main():
-    start_health_server()
-
-    application = (
-        Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
+def build_app() -> Application:
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("clear", clear_pool))
     application.add_handler(CommandHandler("check", check_pool))
@@ -338,23 +311,42 @@ def main():
             handle_input,
         )
     )
+    application.add_error_handler(error_handler)
+    return application
 
-    logger.info("Bot iniciando polling (uma única instância)...")
-    # drop_pending_updates evita processar fila antiga após Conflict
-    application.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-    )
+
+def main():
+    application = build_app()
+
+    # No Railway com domínio público → WEBHOOK (evita Conflict de polling)
+    if RAILWAY_DOMAIN:
+        webhook_url = f"https://{RAILWAY_DOMAIN}/{WEBHOOK_PATH}"
+        logger.info(f"Modo WEBHOOK: {webhook_url}")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=WEBHOOK_PATH,
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        # Local / sem domínio → polling
+        logger.info("Modo POLLING (sem RAILWAY_PUBLIC_DOMAIN)")
+
+        async def _clear_webhook(app: Application) -> None:
+            await app.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Webhook removido. Usando getUpdates.")
+
+        application.post_init = _clear_webhook
+        application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
 
 
 if __name__ == "__main__":
     try:
         main()
-    except telegram.error.Conflict:
-        logger.error(
-            "Conflict: outra instância está usando este token. "
-            "Pare o bot local, deixe só 1 deploy no Railway e redeploy."
-        )
-        raise
     except Exception:
         logger.exception("Unhandled exception in main loop")
