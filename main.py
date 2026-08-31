@@ -4,6 +4,7 @@ import logging
 import asyncio
 import tempfile
 import secrets
+import time
 from pathlib import Path
 
 try:
@@ -44,11 +45,16 @@ except Exception as e:
 
 user_pools: dict[int, list[str]] = {}
 _running_checks: set[int] = set()
+_cancel_flags: dict[int, bool] = {}
+_job_started_at: dict[int, float] = {}
 
 TELEGRAM_MAX_CHARS = 4096
 SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "50")))
 BATCH_SIZE = max(1, int(os.getenv("BATCH_SIZE", "500")))
 MAX_FILE_CHARS = int(os.getenv("MAX_FILE_CHARS", str(15_000_000)))
+# evita travar 10h+ em 400k seeds (RPC free não aguenta)
+MAX_SEEDS = max(1, int(os.getenv("MAX_SEEDS", "20000")))
+# se job > N segundos sem progresso de lote, libera lock no /cancel sempre
 
 RAILWAY_DOMAIN = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip(";")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"telegram/{secrets.token_hex(8)}")
@@ -144,13 +150,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_send(
         context,
         update.effective_chat.id,
-        "🚀 Super Checker — modo RÁPIDO\n\n"
-        f"• Lotes de {BATCH_SIZE} seeds\n"
-        f"• {SEED_WORKERS} workers paralelos\n"
-        "• Path padrão (account0 / idx 0–2)\n"
+        "🚀 Super Checker\n\n"
+        f"• Lotes de {BATCH_SIZE} | até {MAX_SEEDS} seeds/run\n"
+        f"• {SEED_WORKERS} workers\n"
         "• Redes: BTC ETH BSC Polygon SOL TRX + USDT\n\n"
-        "Envie .txt → /check\n"
-        "/start /check /clear /test",
+        "/check — processar\n"
+        "/cancel — parar job travado\n"
+        "/clear /test /start",
     )
 
 
@@ -159,6 +165,30 @@ async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     user_pools[update.effective_user.id] = []
     await safe_send(context, update.effective_chat.id, "🗑️ Memória limpa.")
+
+
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Para o job e libera o lock (resolve 'Check em andamento' eterno)."""
+    if not await is_authorized(update):
+        return
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    if user_id in _running_checks:
+        _cancel_flags[user_id] = True
+        _running_checks.discard(user_id)
+        _job_started_at.pop(user_id, None)
+        await safe_send(
+            context,
+            chat_id,
+            "🛑 Cancelamento solicitado.\n"
+            "O lote atual pode terminar em alguns segundos.\n"
+            "Lock liberado — pode usar /check de novo.",
+        )
+    else:
+        _cancel_flags.pop(user_id, None)
+        _running_checks.discard(user_id)
+        await safe_send(context, chat_id, "✅ Nenhum job ativo. Pode usar /check.")
 
 
 async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -181,6 +211,8 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, status_msg):
+    _cancel_flags[user_id] = False
+    _job_started_at[user_id] = time.time()
     try:
         await safe_edit(status_msg, "🔍 Extraindo seeds BIP39...")
         extractor = SeedExtractor()
@@ -195,19 +227,28 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
                 extra = f"\n\n⚠️ {len(stats.failed_checksum)} checksum inválido\nEx.: {prev}"
             await safe_edit(
                 status_msg,
-                f"⚠️ Nenhuma seed BIP39 válida.\n"
-                f"Palavras: {stats.total_words}"
-                f"{extra}",
+                f"⚠️ Nenhuma seed BIP39 válida.\nPalavras: {stats.total_words}{extra}",
             )
             return
+
+        total_all = len(seeds)
+        if total_all > MAX_SEEDS:
+            seeds = seeds[:MAX_SEEDS]
+            await safe_send(
+                context,
+                chat_id,
+                f"⚠️ {total_all} seeds encontradas.\n"
+                f"Limitando a {MAX_SEEDS} (MAX_SEEDS) para não travar o bot.\n"
+                f"Aumente MAX_SEEDS no Railway se quiser mais.",
+            )
 
         total = len(seeds)
         n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
         await safe_edit(
             status_msg,
             f"✅ {total} seeds | {n_batches} lote(s)×{BATCH_SIZE}\n"
-            f"⚡ {SEED_WORKERS} workers | modo rápido\n"
-            f"🔄 Iniciando...",
+            f"⚡ {SEED_WORKERS} workers\n"
+            f"🔄 Use /cancel para parar",
         )
 
         found_count = 0
@@ -215,13 +256,21 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
         error_count = 0
         checked = 0
         zero_samples: list[str] = []
-        last_edit = 0.0
+        cancelled = False
 
         for batch_i in range(n_batches):
+            if _cancel_flags.get(user_id):
+                cancelled = True
+                break
+
             start = batch_i * BATCH_SIZE
             batch = seeds[start : start + BATCH_SIZE]
 
             async for seed, res, err in check_seeds_bulk(batch, workers=SEED_WORKERS):
+                if _cancel_flags.get(user_id):
+                    cancelled = True
+                    break
+
                 checked += 1
                 if err is not None:
                     error_count += 1
@@ -234,7 +283,7 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
                             text=format_found_message(_v, balances),
                         )
                     except telegram.error.RetryAfter as e:
-                        await asyncio.sleep(e.retry_after)
+                        await asyncio.sleep(min(e.retry_after, 30))
                         try:
                             await context.bot.send_message(
                                 chat_id=chat_id,
@@ -255,35 +304,56 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
                             addrs = preview_addresses(seed)
                             w = seed.split()
                             prev = " ".join(w[:2]) + "…" + " ".join(w[-2:])
-                            zero_samples.append(f"• {prev}\n  TRX `{addrs.get('trx', '?')}`")
+                            zero_samples.append(
+                                f"• {prev}\n  TRX `{addrs.get('trx', '?')}`"
+                            )
                         except Exception:
                             pass
 
-                # atualiza status a cada 25 seeds (menos flood / mais velocidade)
-                if checked % 25 == 0 or checked == total:
+                if checked % 50 == 0 or checked == total:
+                    elapsed = int(time.time() - _job_started_at.get(user_id, time.time()))
+                    rate = checked / max(elapsed, 1)
+                    eta = int((total - checked) / max(rate, 0.01))
                     await safe_edit(
                         status_msg,
                         f"📦 Lote {batch_i + 1}/{n_batches}\n"
-                        f"⏳ {checked}/{total} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}",
+                        f"⏳ {checked}/{total} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}\n"
+                        f"⚡ ~{rate:.1f} seeds/s | ETA ~{eta}s\n"
+                        f"/cancel para parar",
                     )
 
-        summary = (
-            f"✅ Concluído\n"
-            f"• Seeds: {total}\n"
-            f"• Com saldo: {found_count}\n"
-            f"• Sem saldo: {zero_count}\n"
-            f"• Erros: {error_count}"
-        )
-        if zero_samples and found_count == 0:
-            summary += "\n\n🔎 Amostra TRX:\n" + "\n".join(zero_samples)
+            if cancelled:
+                break
+
+        if cancelled:
+            summary = (
+                f"🛑 Cancelado\n"
+                f"• Processadas: {checked}/{total}\n"
+                f"• Com saldo: {found_count}\n"
+                f"• Sem saldo: {zero_count}\n"
+                f"• Erros: {error_count}"
+            )
+        else:
+            summary = (
+                f"✅ Concluído\n"
+                f"• Seeds: {total}\n"
+                f"• Com saldo: {found_count}\n"
+                f"• Sem saldo: {zero_count}\n"
+                f"• Erros: {error_count}"
+            )
+            if zero_samples and found_count == 0:
+                summary += "\n\n🔎 Amostra TRX:\n" + "\n".join(zero_samples)
+
         await safe_edit(status_msg, summary)
         await safe_send(context, chat_id, summary)
 
     except Exception:
         logger.exception("job failed")
-        await safe_send(context, chat_id, "❌ Erro interno. Veja logs.")
+        await safe_send(context, chat_id, "❌ Erro interno. Use /cancel e tente de novo.")
     finally:
         _running_checks.discard(user_id)
+        _cancel_flags.pop(user_id, None)
+        _job_started_at.pop(user_id, None)
 
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -294,7 +364,15 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     chat_id = update.effective_chat.id
 
     if user_id in _running_checks:
-        await safe_send(context, chat_id, "⏳ Check em andamento. Aguarde.")
+        started = _job_started_at.get(user_id)
+        age = int(time.time() - started) if started else -1
+        await safe_send(
+            context,
+            chat_id,
+            f"⏳ Check em andamento"
+            + (f" há {age}s." if age >= 0 else ".")
+            + "\nUse /cancel para parar e liberar.",
+        )
         return
 
     pool = user_pools.get(user_id, [])
@@ -308,7 +386,7 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     status_msg = await safe_send(
         context,
         chat_id,
-        f"📥 {len(full_text):,} chars — job iniciado...",
+        f"📥 {len(full_text):,} chars — job iniciado...\n/cancel se travar",
     )
 
     _running_checks.add(user_id)
@@ -371,6 +449,7 @@ def build_app() -> Application:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("clear", clear_pool))
+    application.add_handler(CommandHandler("cancel", cancel_cmd))
     application.add_handler(CommandHandler("check", check_pool))
     application.add_handler(CommandHandler("test", test_cmd))
     application.add_handler(
@@ -387,7 +466,9 @@ def main():
     application = build_app()
     if RAILWAY_DOMAIN:
         webhook_url = f"https://{RAILWAY_DOMAIN}/{WEBHOOK_PATH}"
-        logger.info(f"WEBHOOK fast | workers={SEED_WORKERS} batch={BATCH_SIZE}")
+        logger.info(
+            f"WEBHOOK | workers={SEED_WORKERS} batch={BATCH_SIZE} max_seeds={MAX_SEEDS}"
+        )
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
