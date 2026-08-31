@@ -14,17 +14,16 @@ from bip_utils import (
 
 logger = logging.getLogger(__name__)
 
-CHECK_CONCURRENCY = int(os.getenv("CHECK_CONCURRENCY", "80"))
-PER_PROVIDER_LIMIT = int(os.getenv("PER_PROVIDER_LIMIT", "25"))
-# TronGrid rate-limit: menos paralelo que as outras
-TRON_CONCURRENCY = int(os.getenv("TRON_CONCURRENCY", "8"))
-SCAN_ADDRESSES = int(os.getenv("SCAN_ADDRESSES", "3"))
+# --- SPEED ---
+CHECK_CONCURRENCY = int(os.getenv("CHECK_CONCURRENCY", "150"))
+PER_PROVIDER_LIMIT = int(os.getenv("PER_PROVIDER_LIMIT", "40"))
+TRON_CONCURRENCY = int(os.getenv("TRON_CONCURRENCY", "30"))
+SCAN_ADDRESSES = int(os.getenv("SCAN_ADDRESSES", "1"))  # só idx 0 = bem mais rápido
 SCAN_ACCOUNTS = int(os.getenv("SCAN_ACCOUNTS", "1"))
 SCAN_INTERNAL = os.getenv("SCAN_INTERNAL", "false").lower() in ("1", "true", "yes")
-CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", "12"))
-CHECK_RETRIES = int(os.getenv("CHECK_RETRIES", "2"))
+CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", "5"))
+CHECK_RETRIES = int(os.getenv("CHECK_RETRIES", "0"))  # 1 tentativa no scan normal
 EARLY_STOP = os.getenv("EARLY_STOP", "true").lower() in ("1", "true", "yes")
-# ignora pó (ex.: 0.00014 USDT) se for o único hit — evita alerta incompleto
 MIN_ALERT_VALUE = float(os.getenv("MIN_ALERT_VALUE", "0.01"))
 
 TRC20_KNOWN = {
@@ -74,9 +73,8 @@ async def _fetch_with_retries(session, method: str, url: str, retries: int = Non
             async with session.request(
                 method, url, timeout=timeout, headers=headers or None, **kwargs
             ) as res:
-                # rate limit TronGrid
                 if res.status == 429:
-                    await asyncio.sleep(1.5 * attempt)
+                    await asyncio.sleep(0.5 * attempt)
                     continue
                 try:
                     text = await res.text()
@@ -86,7 +84,7 @@ async def _fetch_with_retries(session, method: str, url: str, retries: int = Non
         except Exception as e:
             last_exc = e
             if attempt <= retries:
-                await asyncio.sleep(0.4 * attempt)
+                await asyncio.sleep(0.15 * attempt)
     if last_exc:
         raise last_exc
     return 0, None
@@ -101,8 +99,8 @@ async def check_sol(session, addr):
                 bal = json.loads(text).get("result", {}).get("value", 0) / 10**9
                 if bal and bal > 0:
                     return ("SOL", addr, bal)
-        except Exception as e:
-            logger.debug(f"[SOL] {e}")
+        except Exception:
+            pass
     return None
 
 
@@ -117,8 +115,8 @@ async def check_evm_native(session, addr, chain_key: str):
                 bal = int(json.loads(text).get("result", "0x0"), 16) / (10**decimals)
                 if bal and bal > 0:
                     return (label, addr, bal)
-        except Exception as e:
-            logger.debug(f"[{label}] {e}")
+        except Exception:
+            pass
     return None
 
 
@@ -142,8 +140,8 @@ async def check_usdt_evm(session, addr, token_key: str):
                 bal = int(result, 16) / (10**decimals)
                 if bal and bal > 0:
                     return (token_key, addr, bal)
-        except Exception as e:
-            logger.debug(f"[{token_key}] {e}")
+        except Exception:
+            pass
     return None
 
 
@@ -158,13 +156,12 @@ async def check_btc(session, addr):
                     bal = 0
                 if bal and bal > 0:
                     return ("BTC", addr, bal)
-        except Exception as e:
-            logger.debug(f"[BTC] {e}")
+        except Exception:
+            pass
     return None
 
 
 async def check_tron_all(session, addr, retries: int = None) -> list:
-    """TRX + USDT/USDC TRC-20 apenas (sem spam de tokens lixo)."""
     hits = []
     async with PROVIDER_SEMAPHORES["tron"]:
         try:
@@ -190,7 +187,7 @@ async def check_tron_all(session, addr, retries: int = None) -> list:
                     continue
                 for contract, raw in token.items():
                     if contract not in TRC20_KNOWN:
-                        continue  # ignora spam TRC20
+                        continue
                     try:
                         raw_i = int(str(raw))
                     except Exception:
@@ -199,8 +196,8 @@ async def check_tron_all(session, addr, retries: int = None) -> list:
                         continue
                     name, decimals = TRC20_KNOWN[contract]
                     hits.append((name, addr, raw_i / (10**decimals)))
-        except Exception as e:
-            logger.debug(f"[TRON] {addr}: {e}")
+        except Exception:
+            pass
     return hits
 
 
@@ -246,19 +243,16 @@ async def _check_all_chains(session, addrs, tron_retries: int = None) -> list:
 
 
 def _filter_meaningful(hits: list) -> list:
-    """Remove pó irrelevante (ex. 0.00014 USDT) quando não há saldo real."""
     if not hits:
         return []
     meaningful = [h for h in hits if float(h[2]) >= MIN_ALERT_VALUE]
-    return meaningful if meaningful else hits  # se só tem pó, mantém (ainda é hit)
+    return meaningful if meaningful else hits
 
 
-async def _deep_recheck(session, seed_bytes) -> list:
-    """Rechecagem completa path 0 com mais retries no TRON (corrige bulk incompleto)."""
+async def _tron_recheck_only(session, seed_bytes) -> list:
+    """Só refaz TRON com retries (rápido; corrige bulk incompleto)."""
     addrs = _derive_addrs(seed_bytes, 0, 0, Bip44Changes.CHAIN_EXT)
-    await asyncio.sleep(0.3)  # alivia rate limit
-    hits = await _check_all_chains(session, addrs, tron_retries=4)
-    return _filter_meaningful(hits)
+    return await check_tron_all(session, addrs["trx"], retries=3)
 
 
 async def check_seed_params(session, seed: str, accounts: int = None, indexes: int = None, early_stop: bool = None):
@@ -271,10 +265,11 @@ async def check_seed_params(session, seed: str, accounts: int = None, indexes: i
         logger.error(f"Derivacao: {e}")
         return None
 
-    if SCAN_INTERNAL:
-        changes = (Bip44Changes.CHAIN_EXT, Bip44Changes.CHAIN_INT)
-    else:
-        changes = (Bip44Changes.CHAIN_EXT,)
+    changes = (
+        (Bip44Changes.CHAIN_EXT, Bip44Changes.CHAIN_INT)
+        if SCAN_INTERNAL
+        else (Bip44Changes.CHAIN_EXT,)
+    )
 
     found = []
     for acct in range(max(1, accounts)):
@@ -282,28 +277,27 @@ async def check_seed_params(session, seed: str, accounts: int = None, indexes: i
             for change in changes:
                 try:
                     addrs = _derive_addrs(seed_bytes, acct, idx, change)
-                    hits = await _check_all_chains(session, addrs)
-                    hits = _filter_meaningful(hits)
+                    hits = _filter_meaningful(await _check_all_chains(session, addrs))
                     if hits:
                         found.extend(hits)
                         if early_stop:
-                            # IMPORTANTE: recheck path0 completo (TRON costuma falhar no bulk)
-                            deep = await _deep_recheck(session, seed_bytes)
-                            if deep:
-                                # merge por (coin, addr)
-                                seen = {(c, a) for c, a, _ in deep}
-                                for c, a, b in found:
-                                    if (c, a) not in seen:
-                                        deep.append((c, a, b))
-                                return (seed, deep)
-                            return (seed, found)
-                except Exception as e:
-                    logger.debug(f"path {acct}/{idx}: {e}")
+                            # completa só TRON se faltou (não refaz tudo)
+                            has_tron = any(c in ("TRX", "USDT_TRX", "USDC_TRX") for c, _, _ in found)
+                            if not has_tron:
+                                extra = await _tron_recheck_only(session, seed_bytes)
+                                for h in extra:
+                                    if (h[0], h[1]) not in {(c, a) for c, a, _ in found}:
+                                        found.append(h)
+                            return (seed, _filter_meaningful(found))
+                except Exception:
                     continue
 
     if found:
-        deep = await _deep_recheck(session, seed_bytes)
-        return (seed, deep if deep else found)
+        has_tron = any(c in ("TRX", "USDT_TRX", "USDC_TRX") for c, _, _ in found)
+        if not has_tron:
+            extra = await _tron_recheck_only(session, seed_bytes)
+            found.extend(extra)
+        return (seed, _filter_meaningful(found))
     return None
 
 
@@ -312,20 +306,21 @@ async def check_balance_master(type, value, session=None):
         if type == "SEED":
             return await check_seed_params(sess, value)
         if type == "ADDR_TRON" or (isinstance(value, str) and value.startswith("T") and len(value) == 34):
-            hits = await check_tron_all(sess, value, retries=4)
+            hits = await check_tron_all(sess, value, retries=3)
             return (value, hits) if hits else None
         if type == "ADDR_ETH" or (isinstance(value, str) and value.startswith("0x") and len(value) == 42):
-            hits = []
-            for item in await asyncio.gather(
-                check_evm_native(sess, value, "ETH"),
-                check_evm_native(sess, value, "BNB"),
-                check_evm_native(sess, value, "MATIC"),
-                check_usdt_evm(sess, value, "USDT_ETH"),
-                check_usdt_evm(sess, value, "USDT_BSC"),
-                check_usdt_evm(sess, value, "USDT_POLYGON"),
-            ):
-                if item:
-                    hits.append(item)
+            hits = [
+                x
+                for x in await asyncio.gather(
+                    check_evm_native(sess, value, "ETH"),
+                    check_evm_native(sess, value, "BNB"),
+                    check_evm_native(sess, value, "MATIC"),
+                    check_usdt_evm(sess, value, "USDT_ETH"),
+                    check_usdt_evm(sess, value, "USDT_BSC"),
+                    check_usdt_evm(sess, value, "USDT_POLYGON"),
+                )
+                if x
+            ]
             return (value, hits) if hits else None
         if type == "ADDR_BTC" or (isinstance(value, str) and (value.startswith("bc1") or value.startswith(("1", "3")))):
             r = await check_btc(sess, value)
@@ -339,15 +334,14 @@ async def check_balance_master(type, value, session=None):
         return await _run(sess)
 
 
-async def check_seeds_bulk(seeds: list[str], workers: int = 30):
-    # workers altos + TronGrid = relatório incompleto; default mais baixo
-    workers = min(workers, 30)
-    sem = asyncio.Semaphore(max(1, workers))
+async def check_seeds_bulk(seeds: list[str], workers: int = 60):
+    workers = max(1, workers)
+    sem = asyncio.Semaphore(workers)
     queue: asyncio.Queue = asyncio.Queue()
 
     connector = aiohttp.TCPConnector(
         limit=CHECK_CONCURRENCY,
-        limit_per_host=15,
+        limit_per_host=40,
         ttl_dns_cache=300,
         enable_cleanup_closed=True,
     )
@@ -359,7 +353,6 @@ async def check_seeds_bulk(seeds: list[str], workers: int = 30):
                     res = await check_seed_params(session, seed)
                     await queue.put(("ok", seed, res))
                 except Exception as e:
-                    logger.debug(f"bulk error: {e}")
                     await queue.put(("err", seed, e))
 
         tasks = [asyncio.create_task(worker(s)) for s in seeds]
