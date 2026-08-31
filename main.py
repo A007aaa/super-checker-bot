@@ -48,6 +48,12 @@ _job_started_at: dict[int, float] = {}
 
 TELEGRAM_MAX_CHARS = 4096
 TELEGRAM_MIN_INTERVAL = max(0.0, float(os.getenv("TELEGRAM_MIN_INTERVAL", "1.1")))
+# Teto para o sleep de RetryAfter: nunca segure o lock do chat por mais que isso,
+# senão comandos como /cancel e /start ficam travados esperando o mesmo lock.
+TELEGRAM_MAX_RETRY_AFTER = max(1.0, float(os.getenv("TELEGRAM_MAX_RETRY_AFTER", "15")))
+# Tempo máximo esperando o lock do chat antes de desistir (evita travar comandos
+# de controle atrás de um job com um lock preso).
+TELEGRAM_LOCK_TIMEOUT = max(1.0, float(os.getenv("TELEGRAM_LOCK_TIMEOUT", "20")))
 _telegram_locks: dict[int, asyncio.Lock] = {}
 _telegram_last_action: dict[int, float] = {}
 SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "40")))
@@ -113,14 +119,41 @@ async def _wait_telegram_slot(chat_id: int):
     _telegram_last_action[chat_id] = time.monotonic()
 
 
-async def safe_send(context, chat_id: int, text: str):
+async def _acquire_chat_lock(chat_id: int) -> asyncio.Lock | None:
+    """Pega o lock do chat com timeout, pra um job travado nunca bloquear
+    comandos novos (ex: /cancel) pra sempre."""
     lock = _telegram_locks.setdefault(chat_id, asyncio.Lock())
-    async with lock:
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=TELEGRAM_LOCK_TIMEOUT)
+        return lock
+    except asyncio.TimeoutError:
+        logger.warning(f"telegram lock timeout chat={chat_id}; seguindo sem lock")
+        return None
+
+
+async def _sleep_retry_after(e: "telegram.error.RetryAfter", chat_id: int) -> bool:
+    """Espera o RetryAfter até um teto. Retorna False (e não espera) se o
+    Telegram pedir mais que o teto, pra não segurar o lock indefinidamente."""
+    wait = max(0, e.retry_after)
+    if wait > TELEGRAM_MAX_RETRY_AFTER:
+        logger.warning(
+            f"chat={chat_id}: RetryAfter pediu {wait}s (> teto {TELEGRAM_MAX_RETRY_AFTER}s); "
+            "desistindo desse envio pra não travar o bot"
+        )
+        return False
+    await asyncio.sleep(wait)
+    return True
+
+
+async def safe_send(context, chat_id: int, text: str):
+    lock = await _acquire_chat_lock(chat_id)
+    try:
         try:
             await _wait_telegram_slot(chat_id)
             return await context.bot.send_message(chat_id=chat_id, text=text)
         except telegram.error.RetryAfter as e:
-            await asyncio.sleep(max(0, e.retry_after))
+            if not await _sleep_retry_after(e, chat_id):
+                return None
             try:
                 await _wait_telegram_slot(chat_id)
                 return await context.bot.send_message(chat_id=chat_id, text=text)
@@ -129,6 +162,9 @@ async def safe_send(context, chat_id: int, text: str):
         except Exception as e:
             logger.exception(f"send: {e}")
             return None
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 async def safe_edit(message, text: str):
@@ -137,13 +173,14 @@ async def safe_edit(message, text: str):
     chat_id = getattr(getattr(message, "chat", None), "id", None)
     if chat_id is None:
         chat_id = getattr(message, "chat_id", 0) or 0
-    lock = _telegram_locks.setdefault(chat_id, asyncio.Lock())
-    async with lock:
+    lock = await _acquire_chat_lock(chat_id)
+    try:
         try:
             await _wait_telegram_slot(chat_id)
             return await message.edit_text(text)
         except telegram.error.RetryAfter as e:
-            await asyncio.sleep(max(0, e.retry_after))
+            if not await _sleep_retry_after(e, chat_id):
+                return message
             try:
                 await _wait_telegram_slot(chat_id)
                 return await message.edit_text(text)
@@ -151,6 +188,9 @@ async def safe_edit(message, text: str):
                 return message
         except Exception:
             return message
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def _unlock(user_id: int):
