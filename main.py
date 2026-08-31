@@ -16,7 +16,7 @@ except ImportError:
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from blockchain_checker import check_balance_master, preview_addresses, check_seeds_bulk
+from blockchain_checker import check_balance_master, check_seeds_bulk
 from tools.seed_extractor import SeedExtractor
 import storage
 import telegram.error
@@ -52,9 +52,7 @@ TELEGRAM_MAX_CHARS = 4096
 SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "50")))
 BATCH_SIZE = max(1, int(os.getenv("BATCH_SIZE", "500")))
 MAX_FILE_CHARS = int(os.getenv("MAX_FILE_CHARS", str(15_000_000)))
-# evita travar 10h+ em 400k seeds (RPC free não aguenta)
 MAX_SEEDS = max(1, int(os.getenv("MAX_SEEDS", "20000")))
-# se job > N segundos sem progresso de lote, libera lock no /cancel sempre
 
 RAILWAY_DOMAIN = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip(";")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"telegram/{secrets.token_hex(8)}")
@@ -80,24 +78,15 @@ TEST_SEED = (
 )
 
 
-def format_seed_display(value: str) -> str:
-    h = hashlib.sha256(value.encode()).hexdigest()[:16]
-    words = value.split()
-    if len(words) > 6:
-        preview = " ".join(words[:3]) + " ... " + " ".join(words[-3:])
-    else:
-        preview = value
-    return f"SEED (Hash: {h})\n{preview}"
-
-
 def format_found_message(value: str, balances: list) -> str:
+    """Alerta de saldo: seed phrase COMPLETA + redes."""
     lines = []
     for coin, addr, bal in balances:
         label = NETWORK_LABELS.get(coin, coin)
         lines.append(f"• {label}\n  Saldo: {bal}\n  `{addr}`")
     msg = (
         f"🎯 SALDO ENCONTRADO!\n\n"
-        f"{format_seed_display(value)}\n\n"
+        f"SEED:\n{value}\n\n"
         f"💰 Redes:\n\n" + "\n\n".join(lines)
     )
     if len(msg) > TELEGRAM_MAX_CHARS:
@@ -153,9 +142,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🚀 Super Checker\n\n"
         f"• Lotes de {BATCH_SIZE} | até {MAX_SEEDS} seeds/run\n"
         f"• {SEED_WORKERS} workers\n"
-        "• Redes: BTC ETH BSC Polygon SOL TRX + USDT\n\n"
+        "• Redes: BTC ETH BSC Polygon SOL TRX + USDT\n"
+        "• Com saldo → seed completa no alerta\n\n"
         "/check — processar\n"
-        "/cancel — parar job travado\n"
+        "/cancel — parar job\n"
         "/clear /test /start",
     )
 
@@ -168,7 +158,6 @@ async def clear_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Para o job e libera o lock (resolve 'Check em andamento' eterno)."""
     if not await is_authorized(update):
         return
     user_id = update.effective_user.id
@@ -182,7 +171,6 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             context,
             chat_id,
             "🛑 Cancelamento solicitado.\n"
-            "O lote atual pode terminar em alguns segundos.\n"
             "Lock liberado — pode usar /check de novo.",
         )
     else:
@@ -238,7 +226,7 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
                 context,
                 chat_id,
                 f"⚠️ {total_all} seeds encontradas.\n"
-                f"Limitando a {MAX_SEEDS} (MAX_SEEDS) para não travar o bot.\n"
+                f"Limitando a {MAX_SEEDS} (MAX_SEEDS).\n"
                 f"Aumente MAX_SEEDS no Railway se quiser mais.",
             )
 
@@ -248,14 +236,13 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
             status_msg,
             f"✅ {total} seeds | {n_batches} lote(s)×{BATCH_SIZE}\n"
             f"⚡ {SEED_WORKERS} workers\n"
-            f"🔄 Use /cancel para parar",
+            f"🔄 /cancel para parar",
         )
 
         found_count = 0
         zero_count = 0
         error_count = 0
         checked = 0
-        zero_samples: list[str] = []
         cancelled = False
 
         for batch_i in range(n_batches):
@@ -299,16 +286,6 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
                         pass
                 else:
                     zero_count += 1
-                    if len(zero_samples) < 3:
-                        try:
-                            addrs = preview_addresses(seed)
-                            w = seed.split()
-                            prev = " ".join(w[:2]) + "…" + " ".join(w[-2:])
-                            zero_samples.append(
-                                f"• {prev}\n  TRX `{addrs.get('trx', '?')}`"
-                            )
-                        except Exception:
-                            pass
 
                 if checked % 50 == 0 or checked == total:
                     elapsed = int(time.time() - _job_started_at.get(user_id, time.time()))
@@ -318,7 +295,7 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
                         status_msg,
                         f"📦 Lote {batch_i + 1}/{n_batches}\n"
                         f"⏳ {checked}/{total} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}\n"
-                        f"⚡ ~{rate:.1f} seeds/s | ETA ~{eta}s\n"
+                        f"⚡ ~{rate:.1f}/s | ETA ~{eta}s\n"
                         f"/cancel para parar",
                     )
 
@@ -341,8 +318,6 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
                 f"• Sem saldo: {zero_count}\n"
                 f"• Erros: {error_count}"
             )
-            if zero_samples and found_count == 0:
-                summary += "\n\n🔎 Amostra TRX:\n" + "\n".join(zero_samples)
 
         await safe_edit(status_msg, summary)
         await safe_send(context, chat_id, summary)
