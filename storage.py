@@ -12,7 +12,6 @@ import threading
 import hashlib
 import time
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
