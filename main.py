@@ -51,8 +51,10 @@ _job_started_at: dict[int, float] = {}
 TELEGRAM_MAX_CHARS = 4096
 SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "50")))
 BATCH_SIZE = max(1, int(os.getenv("BATCH_SIZE", "500")))
-MAX_FILE_CHARS = int(os.getenv("MAX_FILE_CHARS", str(15_000_000)))
-MAX_SEEDS = max(1, int(os.getenv("MAX_SEEDS", "20000")))
+# Telegram Bot API baixa no máx ~20MB por arquivo
+MAX_FILE_CHARS = int(os.getenv("MAX_FILE_CHARS", str(20_000_000)))
+# até 2 milhões por job (se couber na memória / tempo do Railway)
+MAX_SEEDS = max(1, int(os.getenv("MAX_SEEDS", "2000000")))
 
 RAILWAY_DOMAIN = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip(";")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"telegram/{secrets.token_hex(8)}")
@@ -79,7 +81,6 @@ TEST_SEED = (
 
 
 def format_found_message(value: str, balances: list) -> str:
-    """Alerta de saldo: seed phrase COMPLETA + redes."""
     lines = []
     for coin, addr, bal in balances:
         label = NETWORK_LABELS.get(coin, coin)
@@ -140,13 +141,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context,
         update.effective_chat.id,
         "🚀 Super Checker\n\n"
-        f"• Lotes de {BATCH_SIZE} | até {MAX_SEEDS} seeds/run\n"
+        f"• Lotes de {BATCH_SIZE} | até {MAX_SEEDS:,} seeds/run\n"
         f"• {SEED_WORKERS} workers\n"
         "• Redes: BTC ETH BSC Polygon SOL TRX + USDT\n"
-        "• Com saldo → seed completa no alerta\n\n"
-        "/check — processar\n"
-        "/cancel — parar job\n"
-        "/clear /test /start",
+        "• Com saldo → seed completa\n"
+        "• Arquivo Telegram máx ~20MB (~200k–250k seeds)\n\n"
+        "/check /cancel /clear /test",
     )
 
 
@@ -170,13 +170,12 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await safe_send(
             context,
             chat_id,
-            "🛑 Cancelamento solicitado.\n"
-            "Lock liberado — pode usar /check de novo.",
+            "🛑 Cancelamento solicitado.\nLock liberado — pode /check de novo.",
         )
     else:
         _cancel_flags.pop(user_id, None)
         _running_checks.discard(user_id)
-        await safe_send(context, chat_id, "✅ Nenhum job ativo. Pode usar /check.")
+        await safe_send(context, chat_id, "✅ Nenhum job ativo. Pode /check.")
 
 
 async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -225,16 +224,18 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
             await safe_send(
                 context,
                 chat_id,
-                f"⚠️ {total_all} seeds encontradas.\n"
-                f"Limitando a {MAX_SEEDS} (MAX_SEEDS).\n"
-                f"Aumente MAX_SEEDS no Railway se quiser mais.",
+                f"⚠️ {total_all:,} seeds encontradas.\n"
+                f"Limitando a {MAX_SEEDS:,} (MAX_SEEDS).",
             )
 
         total = len(seeds)
         n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+        # atualiza status com menos frequência em runs gigantes
+        progress_every = 200 if total > 50_000 else 50
+
         await safe_edit(
             status_msg,
-            f"✅ {total} seeds | {n_batches} lote(s)×{BATCH_SIZE}\n"
+            f"✅ {total:,} seeds | {n_batches:,} lote(s)×{BATCH_SIZE}\n"
             f"⚡ {SEED_WORKERS} workers\n"
             f"🔄 /cancel para parar",
         )
@@ -287,15 +288,17 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
                 else:
                     zero_count += 1
 
-                if checked % 50 == 0 or checked == total:
+                if checked % progress_every == 0 or checked == total:
                     elapsed = int(time.time() - _job_started_at.get(user_id, time.time()))
                     rate = checked / max(elapsed, 1)
                     eta = int((total - checked) / max(rate, 0.01))
+                    eta_h = eta // 3600
+                    eta_m = (eta % 3600) // 60
                     await safe_edit(
                         status_msg,
-                        f"📦 Lote {batch_i + 1}/{n_batches}\n"
-                        f"⏳ {checked}/{total} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}\n"
-                        f"⚡ ~{rate:.1f}/s | ETA ~{eta}s\n"
+                        f"📦 Lote {batch_i + 1:,}/{n_batches:,}\n"
+                        f"⏳ {checked:,}/{total:,} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}\n"
+                        f"⚡ ~{rate:.1f}/s | ETA ~{eta_h}h{eta_m}m\n"
                         f"/cancel para parar",
                     )
 
@@ -305,7 +308,7 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
         if cancelled:
             summary = (
                 f"🛑 Cancelado\n"
-                f"• Processadas: {checked}/{total}\n"
+                f"• Processadas: {checked:,}/{total:,}\n"
                 f"• Com saldo: {found_count}\n"
                 f"• Sem saldo: {zero_count}\n"
                 f"• Erros: {error_count}"
@@ -313,7 +316,7 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
         else:
             summary = (
                 f"✅ Concluído\n"
-                f"• Seeds: {total}\n"
+                f"• Seeds: {total:,}\n"
                 f"• Com saldo: {found_count}\n"
                 f"• Sem saldo: {zero_count}\n"
                 f"• Erros: {error_count}"
@@ -385,7 +388,11 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         status = await safe_send(context, chat_id, "⏳ Baixando arquivo...")
         try:
             if doc.file_size and doc.file_size > 20 * 1024 * 1024:
-                await safe_edit(status, "❌ Arquivo > 20MB. Divida o .txt.")
+                await safe_edit(
+                    status,
+                    "❌ Arquivo > 20MB (limite do Telegram Bot API).\n"
+                    "Divida em vários .txt de até ~20MB (~200k seeds).",
+                )
                 return
             file = await context.bot.get_file(doc.file_id)
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
