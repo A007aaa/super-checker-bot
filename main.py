@@ -58,7 +58,6 @@ _telegram_locks: dict[int, asyncio.Lock] = {}
 _telegram_last_action: dict[int, float] = {}
 SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "40")))
 BATCH_SIZE = max(1, int(os.getenv("BATCH_SIZE", "500")))
-MAX_FILE_CHARS = int(os.getenv("MAX_FILE_CHARS", str(20_000_000)))
 MAX_SEEDS = max(1, int(os.getenv("MAX_SEEDS", "2000000")))
 
 RAILWAY_DOMAIN = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip(";")
@@ -365,13 +364,6 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     full_text = "\n".join(pool)
-    if len(full_text) > MAX_FILE_CHARS:
-        await safe_send(
-            context,
-            chat_id,
-            f"❌ Entrada excede o limite configurado de {MAX_FILE_CHARS:,} caracteres.",
-        )
-        return
     user_pools[user_id] = []
     status_msg = await safe_send(context, chat_id, f"📥 {len(full_text):,} chars — iniciando...")
 
@@ -402,12 +394,6 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         doc = update.message.document
         status = await safe_send(context, chat_id, "⏳ Baixando...")
         try:
-            if doc.file_size and doc.file_size > MAX_FILE_CHARS:
-                await safe_edit(
-                    status,
-                    f"❌ Arquivo excede o limite configurado de {MAX_FILE_CHARS:,} caracteres.",
-                )
-                return
             file = await context.bot.get_file(doc.file_id)
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
                 await file.download_to_drive(tmp.name)
@@ -417,12 +403,6 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 os.unlink(tmp.name)
             except OSError:
                 pass
-            if len(text) > MAX_FILE_CHARS:
-                await safe_edit(
-                    status,
-                    f"❌ Conteúdo excede o limite configurado de {MAX_FILE_CHARS:,} caracteres.",
-                )
-                return
             await safe_edit(status, f"✅ {len(text):,} chars. /check")
         except Exception as e:
             await safe_edit(status, f"❌ {e}")
@@ -432,14 +412,6 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await safe_send(context, chat_id, "📥 OK. /check")
     if text.strip():
         pool = user_pools.setdefault(user_id, [])
-        current_chars = sum(len(item) for item in pool)
-        if current_chars + len(text) > MAX_FILE_CHARS:
-            await safe_send(
-                context,
-                chat_id,
-                f"❌ O limite acumulado de {MAX_FILE_CHARS:,} caracteres por execução foi atingido. Use /check ou /clear.",
-            )
-            return
         pool.append(text)
 
 
