@@ -2,7 +2,6 @@ import os
 import logging
 import asyncio
 import tempfile
-import secrets
 import time
 from pathlib import Path
 
@@ -48,13 +47,14 @@ _cancel_flags: dict[int, bool] = {}
 _job_started_at: dict[int, float] = {}
 
 TELEGRAM_MAX_CHARS = 4096
-SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "60")))
+SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "40")))
 BATCH_SIZE = max(1, int(os.getenv("BATCH_SIZE", "500")))
 MAX_FILE_CHARS = int(os.getenv("MAX_FILE_CHARS", str(20_000_000)))
 MAX_SEEDS = max(1, int(os.getenv("MAX_SEEDS", "2000000")))
 
 RAILWAY_DOMAIN = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip(";")
-WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"telegram/{secrets.token_hex(8)}")
+# path ESTÁVEL (não muda a cada restart)
+WEBHOOK_PATH = (os.getenv("WEBHOOK_PATH") or "telegram/webhook").strip().strip("/")
 PORT = int(os.getenv("PORT", "8080"))
 
 NETWORK_LABELS = {
@@ -131,17 +131,21 @@ async def safe_edit(message, text: str):
         return message
 
 
+def _unlock(user_id: int):
+    _running_checks.discard(user_id)
+    _cancel_flags.pop(user_id, None)
+    _job_started_at.pop(user_id, None)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
         return
     await safe_send(
         context,
         update.effective_chat.id,
-        "🚀 Super Checker (rápido)\n\n"
+        "🚀 Super Checker\n\n"
         f"• {SEED_WORKERS} workers | lotes {BATCH_SIZE}\n"
         f"• até {MAX_SEEDS:,} seeds/run\n"
-        "• path 0 | todas as redes\n"
-        "• saldo → seed completa\n\n"
         "/check /cancel /clear /test",
     )
 
@@ -157,16 +161,13 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not await is_authorized(update):
         return
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if user_id in _running_checks:
-        _cancel_flags[user_id] = True
-        _running_checks.discard(user_id)
-        _job_started_at.pop(user_id, None)
-        await safe_send(context, chat_id, "🛑 Cancelado. Pode /check de novo.")
+    _cancel_flags[user_id] = True
+    was = user_id in _running_checks
+    _unlock(user_id)
+    if was:
+        await safe_send(context, update.effective_chat.id, "🛑 Cancelado / lock liberado. Pode /check.")
     else:
-        _cancel_flags.pop(user_id, None)
-        _running_checks.discard(user_id)
-        await safe_send(context, chat_id, "✅ Nenhum job ativo.")
+        await safe_send(context, update.effective_chat.id, "✅ Nenhum job ativo. Pode /check.")
 
 
 async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -177,24 +178,36 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         res = await check_balance_master("SEED", TEST_SEED)
         if res:
-            await safe_edit(status, "✅ OK!\n\n" + format_found_message(TEST_SEED, res[1]))
+            await safe_edit(status, "✅ Bot OK!\n\n" + format_found_message(TEST_SEED, res[1]))
         else:
-            await safe_edit(status, "⚠️ Sem saldo na seed de teste.")
+            await safe_edit(status, "⚠️ Checker respondeu, sem saldo na seed de teste (RPC?).")
     except Exception as e:
-        await safe_edit(status, f"❌ {e}")
+        logger.exception("test")
+        await safe_edit(status, f"❌ Falha no checker: {e}")
 
 
 async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, status_msg):
     _cancel_flags[user_id] = False
     _job_started_at[user_id] = time.time()
     try:
-        await safe_edit(status_msg, "🔍 Extraindo seeds...")
+        await safe_edit(status_msg, "🔍 Extraindo seeds BIP39...")
         extractor = SeedExtractor()
-        stats = await asyncio.to_thread(extractor.extract_with_stats, full_text)
-        seeds = stats.valid
+        try:
+            stats = await asyncio.wait_for(
+                asyncio.to_thread(extractor.extract_with_stats, full_text),
+                timeout=120,
+            )
+        except asyncio.TimeoutError:
+            await safe_edit(status_msg, "❌ Extração demorou >2min. Texto muito grande?")
+            return
 
+        seeds = stats.valid
         if not seeds:
-            await safe_edit(status_msg, f"⚠️ Nenhuma seed BIP39. Palavras: {stats.total_words}")
+            await safe_edit(
+                status_msg,
+                f"⚠️ Nenhuma seed BIP39 válida.\nPalavras BIP39: {stats.total_words}\n"
+                f"Janelas: {getattr(stats, 'windows_scanned', '?')}",
+            )
             return
 
         total_all = len(seeds)
@@ -204,11 +217,11 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
 
         total = len(seeds)
         n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
-        progress_every = 100 if total > 10_000 else 25
+        progress_every = 50 if total > 5_000 else 10
 
         await safe_edit(
             status_msg,
-            f"✅ {total:,} seeds | {n_batches} lotes | {SEED_WORKERS} workers\n/cancel para parar",
+            f"✅ {total:,} seeds | {n_batches} lote(s) | {SEED_WORKERS} workers\n🔄 checando...",
         )
 
         found_count = zero_count = error_count = checked = 0
@@ -242,7 +255,7 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
                         except Exception:
                             pass
                     except Exception:
-                        pass
+                        logger.exception("notify")
                     try:
                         storage.mark_alerted("SEED", res[0])
                     except Exception:
@@ -251,14 +264,14 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
                     zero_count += 1
 
                 if checked % progress_every == 0 or checked == total:
-                    elapsed = max(1, int(time.time() - _job_started_at[user_id]))
+                    elapsed = max(1, int(time.time() - _job_started_at.get(user_id, time.time())))
                     rate = checked / elapsed
                     eta = int((total - checked) / max(rate, 0.01))
                     await safe_edit(
                         status_msg,
                         f"📦 {batch_i + 1}/{n_batches}\n"
                         f"⏳ {checked:,}/{total:,} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}\n"
-                        f"⚡ ~{rate:.1f}/s | ETA ~{eta // 60}m{eta % 60}s",
+                        f"⚡ ~{rate:.1f}/s | ETA ~{eta // 60}m",
                     )
 
             if cancelled:
@@ -271,13 +284,11 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
         )
         await safe_edit(status_msg, summary)
         await safe_send(context, chat_id, summary)
-    except Exception:
+    except Exception as e:
         logger.exception("job failed")
-        await safe_send(context, chat_id, "❌ Erro. /cancel e tente de novo.")
+        await safe_send(context, chat_id, f"❌ Erro no job: {type(e).__name__}: {e}\nUse /cancel")
     finally:
-        _running_checks.discard(user_id)
-        _cancel_flags.pop(user_id, None)
-        _job_started_at.pop(user_id, None)
+        _unlock(user_id)
 
 
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -285,20 +296,45 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
+
     if user_id in _running_checks:
-        await safe_send(context, chat_id, "⏳ Em andamento. /cancel para liberar.")
+        age = int(time.time() - _job_started_at[user_id]) if user_id in _job_started_at else -1
+        # auto-libera se travado > 30 min
+        if age > 1800:
+            _unlock(user_id)
+            await safe_send(context, chat_id, "⚠️ Job antigo liberado. Envie /check de novo.")
+            return
+        await safe_send(
+            context,
+            chat_id,
+            f"⏳ Em andamento" + (f" há {age}s" if age >= 0 else "") + ".\n/cancel para liberar.",
+        )
         return
+
     pool = user_pools.get(user_id, [])
     if not pool:
-        await safe_send(context, chat_id, "❌ Envie .txt e /check.")
+        await safe_send(context, chat_id, "❌ Envie texto/.txt e /check.")
         return
+
     full_text = "\n".join(pool)
     user_pools[user_id] = []
-    status_msg = await safe_send(context, chat_id, f"📥 {len(full_text):,} chars...")
+    status_msg = await safe_send(context, chat_id, f"📥 {len(full_text):,} chars — iniciando...")
+
     _running_checks.add(user_id)
-    context.application.create_task(
-        _run_check_job(context, chat_id, user_id, full_text, status_msg)
-    )
+
+    async def _wrapper():
+        try:
+            await _run_check_job(context, chat_id, user_id, full_text, status_msg)
+        except Exception:
+            logger.exception("wrapper")
+            _unlock(user_id)
+            await safe_send(context, chat_id, "❌ Job caiu. /cancel e tente de novo.")
+
+    try:
+        context.application.create_task(_wrapper())
+    except Exception as e:
+        _unlock(user_id)
+        await safe_edit(status_msg, f"❌ Não iniciou o job: {e}")
 
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -336,7 +372,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, telegram.error.Conflict):
-        logger.error("Conflict token")
+        logger.error("Conflict: outra instância com o mesmo token.")
         return
     logger.exception("update error", exc_info=context.error)
 
@@ -358,15 +394,18 @@ def build_app() -> Application:
 def main():
     application = build_app()
     if RAILWAY_DOMAIN:
+        url = f"https://{RAILWAY_DOMAIN}/{WEBHOOK_PATH}"
+        logger.info(f"WEBHOOK {url} workers={SEED_WORKERS}")
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=WEBHOOK_PATH,
-            webhook_url=f"https://{RAILWAY_DOMAIN}/{WEBHOOK_PATH}",
+            webhook_url=url,
             drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES,
         )
     else:
+        logger.info("POLLING")
 
         async def _clear(app: Application):
             await app.bot.delete_webhook(drop_pending_updates=True)
