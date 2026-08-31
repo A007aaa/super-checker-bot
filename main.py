@@ -1,5 +1,4 @@
 import os
-import hashlib
 import logging
 import asyncio
 import tempfile
@@ -49,11 +48,9 @@ _cancel_flags: dict[int, bool] = {}
 _job_started_at: dict[int, float] = {}
 
 TELEGRAM_MAX_CHARS = 4096
-SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "50")))
+SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "60")))
 BATCH_SIZE = max(1, int(os.getenv("BATCH_SIZE", "500")))
-# Telegram Bot API baixa no máx ~20MB por arquivo
 MAX_FILE_CHARS = int(os.getenv("MAX_FILE_CHARS", str(20_000_000)))
-# até 2 milhões por job (se couber na memória / tempo do Railway)
 MAX_SEEDS = max(1, int(os.getenv("MAX_SEEDS", "2000000")))
 
 RAILWAY_DOMAIN = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip(";")
@@ -140,12 +137,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_send(
         context,
         update.effective_chat.id,
-        "🚀 Super Checker\n\n"
-        f"• Lotes de {BATCH_SIZE} | até {MAX_SEEDS:,} seeds/run\n"
-        f"• {SEED_WORKERS} workers\n"
-        "• Redes: BTC ETH BSC Polygon SOL TRX + USDT\n"
-        "• Com saldo → seed completa\n"
-        "• Arquivo Telegram máx ~20MB (~200k–250k seeds)\n\n"
+        "🚀 Super Checker (rápido)\n\n"
+        f"• {SEED_WORKERS} workers | lotes {BATCH_SIZE}\n"
+        f"• até {MAX_SEEDS:,} seeds/run\n"
+        "• path 0 | todas as redes\n"
+        "• saldo → seed completa\n\n"
         "/check /cancel /clear /test",
     )
 
@@ -162,38 +158,29 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-
     if user_id in _running_checks:
         _cancel_flags[user_id] = True
         _running_checks.discard(user_id)
         _job_started_at.pop(user_id, None)
-        await safe_send(
-            context,
-            chat_id,
-            "🛑 Cancelamento solicitado.\nLock liberado — pode /check de novo.",
-        )
+        await safe_send(context, chat_id, "🛑 Cancelado. Pode /check de novo.")
     else:
         _cancel_flags.pop(user_id, None)
         _running_checks.discard(user_id)
-        await safe_send(context, chat_id, "✅ Nenhum job ativo. Pode /check.")
+        await safe_send(context, chat_id, "✅ Nenhum job ativo.")
 
 
 async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
         return
     chat_id = update.effective_chat.id
-    status = await safe_send(context, chat_id, "🧪 Teste rápido...")
+    status = await safe_send(context, chat_id, "🧪 Teste...")
     try:
         res = await check_balance_master("SEED", TEST_SEED)
         if res:
-            _v, balances = res
-            await safe_edit(
-                status, "✅ OK!\n\n" + format_found_message(TEST_SEED, balances)
-            )
+            await safe_edit(status, "✅ OK!\n\n" + format_found_message(TEST_SEED, res[1]))
         else:
             await safe_edit(status, "⚠️ Sem saldo na seed de teste.")
     except Exception as e:
-        logger.exception("test failed")
         await safe_edit(status, f"❌ {e}")
 
 
@@ -201,133 +188,92 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
     _cancel_flags[user_id] = False
     _job_started_at[user_id] = time.time()
     try:
-        await safe_edit(status_msg, "🔍 Extraindo seeds BIP39...")
+        await safe_edit(status_msg, "🔍 Extraindo seeds...")
         extractor = SeedExtractor()
         stats = await asyncio.to_thread(extractor.extract_with_stats, full_text)
         seeds = stats.valid
 
         if not seeds:
-            extra = ""
-            if stats.failed_checksum:
-                sample = stats.failed_checksum[0].split()
-                prev = " ".join(sample[:3]) + " ... " + " ".join(sample[-3:])
-                extra = f"\n\n⚠️ {len(stats.failed_checksum)} checksum inválido\nEx.: {prev}"
-            await safe_edit(
-                status_msg,
-                f"⚠️ Nenhuma seed BIP39 válida.\nPalavras: {stats.total_words}{extra}",
-            )
+            await safe_edit(status_msg, f"⚠️ Nenhuma seed BIP39. Palavras: {stats.total_words}")
             return
 
         total_all = len(seeds)
         if total_all > MAX_SEEDS:
             seeds = seeds[:MAX_SEEDS]
-            await safe_send(
-                context,
-                chat_id,
-                f"⚠️ {total_all:,} seeds encontradas.\n"
-                f"Limitando a {MAX_SEEDS:,} (MAX_SEEDS).",
-            )
+            await safe_send(context, chat_id, f"⚠️ {total_all:,} → limitando a {MAX_SEEDS:,}")
 
         total = len(seeds)
         n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
-        # atualiza status com menos frequência em runs gigantes
-        progress_every = 200 if total > 50_000 else 50
+        progress_every = 100 if total > 10_000 else 25
 
         await safe_edit(
             status_msg,
-            f"✅ {total:,} seeds | {n_batches:,} lote(s)×{BATCH_SIZE}\n"
-            f"⚡ {SEED_WORKERS} workers\n"
-            f"🔄 /cancel para parar",
+            f"✅ {total:,} seeds | {n_batches} lotes | {SEED_WORKERS} workers\n/cancel para parar",
         )
 
-        found_count = 0
-        zero_count = 0
-        error_count = 0
-        checked = 0
+        found_count = zero_count = error_count = checked = 0
         cancelled = False
 
         for batch_i in range(n_batches):
             if _cancel_flags.get(user_id):
                 cancelled = True
                 break
-
-            start = batch_i * BATCH_SIZE
-            batch = seeds[start : start + BATCH_SIZE]
+            batch = seeds[batch_i * BATCH_SIZE : (batch_i + 1) * BATCH_SIZE]
 
             async for seed, res, err in check_seeds_bulk(batch, workers=SEED_WORKERS):
                 if _cancel_flags.get(user_id):
                     cancelled = True
                     break
-
                 checked += 1
                 if err is not None:
                     error_count += 1
                 elif res:
-                    _v, balances = res
                     found_count += 1
                     try:
                         await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=format_found_message(_v, balances),
+                            chat_id=chat_id, text=format_found_message(res[0], res[1])
                         )
                     except telegram.error.RetryAfter as e:
-                        await asyncio.sleep(min(e.retry_after, 30))
+                        await asyncio.sleep(min(e.retry_after, 20))
                         try:
                             await context.bot.send_message(
-                                chat_id=chat_id,
-                                text=format_found_message(_v, balances),
+                                chat_id=chat_id, text=format_found_message(res[0], res[1])
                             )
                         except Exception:
                             pass
                     except Exception:
-                        logger.exception("notify fail")
+                        pass
                     try:
-                        storage.mark_alerted("SEED", _v)
+                        storage.mark_alerted("SEED", res[0])
                     except Exception:
                         pass
                 else:
                     zero_count += 1
 
                 if checked % progress_every == 0 or checked == total:
-                    elapsed = int(time.time() - _job_started_at.get(user_id, time.time()))
-                    rate = checked / max(elapsed, 1)
+                    elapsed = max(1, int(time.time() - _job_started_at[user_id]))
+                    rate = checked / elapsed
                     eta = int((total - checked) / max(rate, 0.01))
-                    eta_h = eta // 3600
-                    eta_m = (eta % 3600) // 60
                     await safe_edit(
                         status_msg,
-                        f"📦 Lote {batch_i + 1:,}/{n_batches:,}\n"
+                        f"📦 {batch_i + 1}/{n_batches}\n"
                         f"⏳ {checked:,}/{total:,} | 💰{found_count} | ⚪{zero_count} | ❌{error_count}\n"
-                        f"⚡ ~{rate:.1f}/s | ETA ~{eta_h}h{eta_m}m\n"
-                        f"/cancel para parar",
+                        f"⚡ ~{rate:.1f}/s | ETA ~{eta // 60}m{eta % 60}s",
                     )
 
             if cancelled:
                 break
 
-        if cancelled:
-            summary = (
-                f"🛑 Cancelado\n"
-                f"• Processadas: {checked:,}/{total:,}\n"
-                f"• Com saldo: {found_count}\n"
-                f"• Sem saldo: {zero_count}\n"
-                f"• Erros: {error_count}"
-            )
-        else:
-            summary = (
-                f"✅ Concluído\n"
-                f"• Seeds: {total:,}\n"
-                f"• Com saldo: {found_count}\n"
-                f"• Sem saldo: {zero_count}\n"
-                f"• Erros: {error_count}"
-            )
-
+        tag = "🛑 Cancelado" if cancelled else "✅ Concluído"
+        summary = (
+            f"{tag}\n• {checked:,}/{total:,}\n• Com saldo: {found_count}\n"
+            f"• Sem saldo: {zero_count}\n• Erros: {error_count}"
+        )
         await safe_edit(status_msg, summary)
         await safe_send(context, chat_id, summary)
-
     except Exception:
         logger.exception("job failed")
-        await safe_send(context, chat_id, "❌ Erro interno. Use /cancel e tente de novo.")
+        await safe_send(context, chat_id, "❌ Erro. /cancel e tente de novo.")
     finally:
         _running_checks.discard(user_id)
         _cancel_flags.pop(user_id, None)
@@ -337,36 +283,18 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
 async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_authorized(update):
         return
-
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-
     if user_id in _running_checks:
-        started = _job_started_at.get(user_id)
-        age = int(time.time() - started) if started else -1
-        await safe_send(
-            context,
-            chat_id,
-            f"⏳ Check em andamento"
-            + (f" há {age}s." if age >= 0 else ".")
-            + "\nUse /cancel para parar e liberar.",
-        )
+        await safe_send(context, chat_id, "⏳ Em andamento. /cancel para liberar.")
         return
-
     pool = user_pools.get(user_id, [])
     if not pool:
-        await safe_send(context, chat_id, "❌ Envie texto/.txt e use /check.")
+        await safe_send(context, chat_id, "❌ Envie .txt e /check.")
         return
-
     full_text = "\n".join(pool)
     user_pools[user_id] = []
-
-    status_msg = await safe_send(
-        context,
-        chat_id,
-        f"📥 {len(full_text):,} chars — job iniciado...\n/cancel se travar",
-    )
-
+    status_msg = await safe_send(context, chat_id, f"📥 {len(full_text):,} chars...")
     _running_checks.add(user_id)
     context.application.create_task(
         _run_check_job(context, chat_id, user_id, full_text, status_msg)
@@ -374,25 +302,17 @@ async def check_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await is_authorized(update):
+    if not await is_authorized(update) or not update.message:
         return
-    if not update.message:
-        return
-
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     text = ""
-
     if update.message.document:
         doc = update.message.document
-        status = await safe_send(context, chat_id, "⏳ Baixando arquivo...")
+        status = await safe_send(context, chat_id, "⏳ Baixando...")
         try:
             if doc.file_size and doc.file_size > 20 * 1024 * 1024:
-                await safe_edit(
-                    status,
-                    "❌ Arquivo > 20MB (limite do Telegram Bot API).\n"
-                    "Divida em vários .txt de até ~20MB (~200k seeds).",
-                )
+                await safe_edit(status, "❌ >20MB. Divida o arquivo.")
                 return
             file = await context.bot.get_file(doc.file_id)
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -403,72 +323,56 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 os.unlink(tmp.name)
             except OSError:
                 pass
-            if len(text) > MAX_FILE_CHARS:
-                text = text[:MAX_FILE_CHARS]
-                await safe_edit(status, f"⚠️ Truncado para {MAX_FILE_CHARS:,} chars. /check")
-            else:
-                await safe_edit(status, f"✅ {len(text):,} chars. Use /check")
+            await safe_edit(status, f"✅ {len(text):,} chars. /check")
         except Exception as e:
             await safe_edit(status, f"❌ {e}")
             return
     elif update.message.text:
         text = update.message.text
-        await safe_send(context, chat_id, "📥 OK. Use /check")
-
+        await safe_send(context, chat_id, "📥 OK. /check")
     if text.strip():
         user_pools.setdefault(user_id, []).append(text)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    err = context.error
-    if isinstance(err, telegram.error.Conflict):
-        logger.error("Conflict: outra instância com este token.")
+    if isinstance(context.error, telegram.error.Conflict):
+        logger.error("Conflict token")
         return
-    logger.exception("update error", exc_info=err)
+    logger.exception("update error", exc_info=context.error)
 
 
 def build_app() -> Application:
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("clear", clear_pool))
-    application.add_handler(CommandHandler("cancel", cancel_cmd))
-    application.add_handler(CommandHandler("check", check_pool))
-    application.add_handler(CommandHandler("test", test_cmd))
-    application.add_handler(
-        MessageHandler(
-            (filters.TEXT | filters.Document.ALL) & ~filters.COMMAND,
-            handle_input,
-        )
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("clear", clear_pool))
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(CommandHandler("check", check_pool))
+    app.add_handler(CommandHandler("test", test_cmd))
+    app.add_handler(
+        MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, handle_input)
     )
-    application.add_error_handler(error_handler)
-    return application
+    app.add_error_handler(error_handler)
+    return app
 
 
 def main():
     application = build_app()
     if RAILWAY_DOMAIN:
-        webhook_url = f"https://{RAILWAY_DOMAIN}/{WEBHOOK_PATH}"
-        logger.info(
-            f"WEBHOOK | workers={SEED_WORKERS} batch={BATCH_SIZE} max_seeds={MAX_SEEDS}"
-        )
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=WEBHOOK_PATH,
-            webhook_url=webhook_url,
+            webhook_url=f"https://{RAILWAY_DOMAIN}/{WEBHOOK_PATH}",
             drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES,
         )
     else:
-        logger.info("POLLING")
 
         async def _clear(app: Application):
             await app.bot.delete_webhook(drop_pending_updates=True)
 
         application.post_init = _clear
-        application.run_polling(
-            drop_pending_updates=True, allowed_updates=Update.ALL_TYPES
-        )
+        application.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
