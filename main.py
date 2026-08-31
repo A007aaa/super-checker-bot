@@ -47,6 +47,9 @@ _cancel_flags: dict[int, bool] = {}
 _job_started_at: dict[int, float] = {}
 
 TELEGRAM_MAX_CHARS = 4096
+TELEGRAM_MIN_INTERVAL = max(0.0, float(os.getenv("TELEGRAM_MIN_INTERVAL", "1.1")))
+_telegram_locks: dict[int, asyncio.Lock] = {}
+_telegram_last_action: dict[int, float] = {}
 SEED_WORKERS = max(1, int(os.getenv("SEED_WORKERS", "40")))
 BATCH_SIZE = max(1, int(os.getenv("BATCH_SIZE", "500")))
 MAX_FILE_CHARS = int(os.getenv("MAX_FILE_CHARS", str(20_000_000)))
@@ -100,35 +103,54 @@ async def is_authorized(update: Update) -> bool:
     return update.effective_user.id == ALLOWED_USER_ID
 
 
+async def _wait_telegram_slot(chat_id: int):
+    if TELEGRAM_MIN_INTERVAL <= 0:
+        return
+    last = _telegram_last_action.get(chat_id, 0.0)
+    delay = TELEGRAM_MIN_INTERVAL - (time.monotonic() - last)
+    if delay > 0:
+        await asyncio.sleep(delay)
+    _telegram_last_action[chat_id] = time.monotonic()
+
+
 async def safe_send(context, chat_id: int, text: str):
-    try:
-        return await context.bot.send_message(chat_id=chat_id, text=text)
-    except telegram.error.RetryAfter as e:
-        await asyncio.sleep(e.retry_after)
+    lock = _telegram_locks.setdefault(chat_id, asyncio.Lock())
+    async with lock:
         try:
+            await _wait_telegram_slot(chat_id)
             return await context.bot.send_message(chat_id=chat_id, text=text)
-        except Exception:
+        except telegram.error.RetryAfter as e:
+            await asyncio.sleep(max(0, e.retry_after))
+            try:
+                await _wait_telegram_slot(chat_id)
+                return await context.bot.send_message(chat_id=chat_id, text=text)
+            except Exception:
+                return None
+        except Exception as e:
+            logger.exception(f"send: {e}")
             return None
-    except Exception as e:
-        logger.exception(f"send: {e}")
-        return None
 
 
 async def safe_edit(message, text: str):
     if message is None:
         return None
-    try:
-        return await message.edit_text(text)
-    except telegram.error.RetryAfter as e:
-        if e.retry_after > 60:
-            return message
-        await asyncio.sleep(e.retry_after)
+    chat_id = getattr(getattr(message, "chat", None), "id", None)
+    if chat_id is None:
+        chat_id = getattr(message, "chat_id", 0) or 0
+    lock = _telegram_locks.setdefault(chat_id, asyncio.Lock())
+    async with lock:
         try:
+            await _wait_telegram_slot(chat_id)
             return await message.edit_text(text)
+        except telegram.error.RetryAfter as e:
+            await asyncio.sleep(max(0, e.retry_after))
+            try:
+                await _wait_telegram_slot(chat_id)
+                return await message.edit_text(text)
+            except Exception:
+                return message
         except Exception:
             return message
-    except Exception:
-        return message
 
 
 def _unlock(user_id: int):
@@ -217,7 +239,6 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
 
         total = len(seeds)
         n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
-        progress_every = 50 if total > 5_000 else 10
 
         await safe_edit(
             status_msg,
@@ -225,6 +246,7 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
         )
 
         found_count = zero_count = error_count = checked = 0
+        last_progress_at = 0.0
         cancelled = False
 
         for batch_i in range(n_batches):
@@ -243,17 +265,9 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
                 elif res:
                     found_count += 1
                     try:
-                        await context.bot.send_message(
-                            chat_id=chat_id, text=format_found_message(res[0], res[1])
+                        await safe_send(
+                            context, chat_id, format_found_message(res[0], res[1])
                         )
-                    except telegram.error.RetryAfter as e:
-                        await asyncio.sleep(min(e.retry_after, 20))
-                        try:
-                            await context.bot.send_message(
-                                chat_id=chat_id, text=format_found_message(res[0], res[1])
-                            )
-                        except Exception:
-                            pass
                     except Exception:
                         logger.exception("notify")
                     try:
@@ -263,7 +277,9 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
                 else:
                     zero_count += 1
 
-                if checked % progress_every == 0 or checked == total:
+                now = time.monotonic()
+                if checked == total or now - last_progress_at >= 5.0:
+                    last_progress_at = now
                     elapsed = max(1, int(time.time() - _job_started_at.get(user_id, time.time())))
                     rate = checked / elapsed
                     eta = int((total - checked) / max(rate, 0.01))
@@ -283,7 +299,6 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
             f"• Sem saldo: {zero_count}\n• Erros: {error_count}"
         )
         await safe_edit(status_msg, summary)
-        await safe_send(context, chat_id, summary)
     except Exception as e:
         logger.exception("job failed")
         await safe_send(context, chat_id, f"❌ Erro no job: {type(e).__name__}: {e}\nUse /cancel")
