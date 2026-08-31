@@ -14,17 +14,18 @@ from bip_utils import (
 
 logger = logging.getLogger(__name__)
 
-# --- SPEED ---
-CHECK_CONCURRENCY = int(os.getenv("CHECK_CONCURRENCY", "150"))
-PER_PROVIDER_LIMIT = int(os.getenv("PER_PROVIDER_LIMIT", "40"))
-TRON_CONCURRENCY = int(os.getenv("TRON_CONCURRENCY", "30"))
-SCAN_ADDRESSES = int(os.getenv("SCAN_ADDRESSES", "1"))  # só idx 0 = bem mais rápido
+# Velocidade (path 0) + confiabilidade (retries reais)
+CHECK_CONCURRENCY = int(os.getenv("CHECK_CONCURRENCY", "100"))
+PER_PROVIDER_LIMIT = int(os.getenv("PER_PROVIDER_LIMIT", "30"))
+TRON_CONCURRENCY = int(os.getenv("TRON_CONCURRENCY", "20"))
+SCAN_ADDRESSES = int(os.getenv("SCAN_ADDRESSES", "1"))
 SCAN_ACCOUNTS = int(os.getenv("SCAN_ACCOUNTS", "1"))
 SCAN_INTERNAL = os.getenv("SCAN_INTERNAL", "false").lower() in ("1", "true", "yes")
-CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", "5"))
-CHECK_RETRIES = int(os.getenv("CHECK_RETRIES", "0"))  # 1 tentativa no scan normal
+CHECK_TIMEOUT = int(os.getenv("CHECK_TIMEOUT", "10"))
+CHECK_RETRIES = int(os.getenv("CHECK_RETRIES", "1"))
+TRON_RETRIES = int(os.getenv("TRON_RETRIES", "2"))
 EARLY_STOP = os.getenv("EARLY_STOP", "true").lower() in ("1", "true", "yes")
-MIN_ALERT_VALUE = float(os.getenv("MIN_ALERT_VALUE", "0.01"))
+MIN_ALERT_VALUE = float(os.getenv("MIN_ALERT_VALUE", "0"))  # reporta qualquer saldo > 0
 
 TRC20_KNOWN = {
     "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t": ("USDT_TRX", 6),
@@ -74,7 +75,7 @@ async def _fetch_with_retries(session, method: str, url: str, retries: int = Non
                 method, url, timeout=timeout, headers=headers or None, **kwargs
             ) as res:
                 if res.status == 429:
-                    await asyncio.sleep(0.5 * attempt)
+                    await asyncio.sleep(0.8 * attempt)
                     continue
                 try:
                     text = await res.text()
@@ -84,7 +85,7 @@ async def _fetch_with_retries(session, method: str, url: str, retries: int = Non
         except Exception as e:
             last_exc = e
             if attempt <= retries:
-                await asyncio.sleep(0.15 * attempt)
+                await asyncio.sleep(0.25 * attempt)
     if last_exc:
         raise last_exc
     return 0, None
@@ -99,8 +100,8 @@ async def check_sol(session, addr):
                 bal = json.loads(text).get("result", {}).get("value", 0) / 10**9
                 if bal and bal > 0:
                     return ("SOL", addr, bal)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"SOL {e}")
     return None
 
 
@@ -115,8 +116,8 @@ async def check_evm_native(session, addr, chain_key: str):
                 bal = int(json.loads(text).get("result", "0x0"), 16) / (10**decimals)
                 if bal and bal > 0:
                     return (label, addr, bal)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"{label} {e}")
     return None
 
 
@@ -140,8 +141,8 @@ async def check_usdt_evm(session, addr, token_key: str):
                 bal = int(result, 16) / (10**decimals)
                 if bal and bal > 0:
                     return (token_key, addr, bal)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"{token_key} {e}")
     return None
 
 
@@ -156,19 +157,21 @@ async def check_btc(session, addr):
                     bal = 0
                 if bal and bal > 0:
                     return ("BTC", addr, bal)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"BTC {e}")
     return None
 
 
 async def check_tron_all(session, addr, retries: int = None) -> list:
     hits = []
+    r = TRON_RETRIES if retries is None else retries
     async with PROVIDER_SEMAPHORES["tron"]:
         try:
             status, text = await _fetch_with_retries(
-                session, "GET", PROVIDERS["tron"][0] + addr, retries=retries
+                session, "GET", PROVIDERS["tron"][0] + addr, retries=r
             )
             if status != 200 or not text:
+                logger.debug(f"TRON status={status} addr={addr[:8]}")
                 return hits
             data = json.loads(text)
             rows = data.get("data") or []
@@ -196,8 +199,8 @@ async def check_tron_all(session, addr, retries: int = None) -> list:
                         continue
                     name, decimals = TRC20_KNOWN[contract]
                     hits.append((name, addr, raw_i / (10**decimals)))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"TRON {addr[:8]}: {e}")
     return hits
 
 
@@ -216,10 +219,10 @@ def _derive_addrs(seed_bytes, acct: int, idx: int, change):
     }
 
 
-async def _check_all_chains(session, addrs, tron_retries: int = None) -> list:
+async def _check_all_chains(session, addrs) -> list:
     evm = addrs["eth"]
     results = await asyncio.gather(
-        check_tron_all(session, addrs["trx"], retries=tron_retries),
+        check_tron_all(session, addrs["trx"]),  # sempre TRON_RETRIES
         check_evm_native(session, evm, "ETH"),
         check_evm_native(session, evm, "BNB"),
         check_evm_native(session, evm, "MATIC"),
@@ -242,17 +245,13 @@ async def _check_all_chains(session, addrs, tron_retries: int = None) -> list:
     return hits
 
 
-def _filter_meaningful(hits: list) -> list:
+def _filter_hits(hits: list) -> list:
     if not hits:
         return []
+    if MIN_ALERT_VALUE <= 0:
+        return hits
     meaningful = [h for h in hits if float(h[2]) >= MIN_ALERT_VALUE]
     return meaningful if meaningful else hits
-
-
-async def _tron_recheck_only(session, seed_bytes) -> list:
-    """Só refaz TRON com retries (rápido; corrige bulk incompleto)."""
-    addrs = _derive_addrs(seed_bytes, 0, 0, Bip44Changes.CHAIN_EXT)
-    return await check_tron_all(session, addrs["trx"], retries=3)
 
 
 async def check_seed_params(session, seed: str, accounts: int = None, indexes: int = None, early_stop: bool = None):
@@ -277,28 +276,25 @@ async def check_seed_params(session, seed: str, accounts: int = None, indexes: i
             for change in changes:
                 try:
                     addrs = _derive_addrs(seed_bytes, acct, idx, change)
-                    hits = _filter_meaningful(await _check_all_chains(session, addrs))
+                    hits = _filter_hits(await _check_all_chains(session, addrs))
                     if hits:
                         found.extend(hits)
                         if early_stop:
-                            # completa só TRON se faltou (não refaz tudo)
-                            has_tron = any(c in ("TRX", "USDT_TRX", "USDC_TRX") for c, _, _ in found)
-                            if not has_tron:
-                                extra = await _tron_recheck_only(session, seed_bytes)
-                                for h in extra:
-                                    if (h[0], h[1]) not in {(c, a) for c, a, _ in found}:
-                                        found.append(h)
-                            return (seed, _filter_meaningful(found))
-                except Exception:
+                            return (seed, found)
+                except Exception as e:
+                    logger.debug(f"path {acct}/{idx}: {e}")
                     continue
 
-    if found:
-        has_tron = any(c in ("TRX", "USDT_TRX", "USDC_TRX") for c, _, _ in found)
-        if not has_tron:
-            extra = await _tron_recheck_only(session, seed_bytes)
-            found.extend(extra)
-        return (seed, _filter_meaningful(found))
-    return None
+    # se nada: 1 recheck TRON (saldo costuma estar aí e API falha no bulk)
+    if not found:
+        try:
+            addrs = _derive_addrs(seed_bytes, 0, 0, Bip44Changes.CHAIN_EXT)
+            extra = await check_tron_all(session, addrs["trx"], retries=max(3, TRON_RETRIES))
+            found = _filter_hits(extra)
+        except Exception:
+            pass
+
+    return (seed, found) if found else None
 
 
 async def check_balance_master(type, value, session=None):
@@ -334,14 +330,14 @@ async def check_balance_master(type, value, session=None):
         return await _run(sess)
 
 
-async def check_seeds_bulk(seeds: list[str], workers: int = 60):
-    workers = max(1, workers)
+async def check_seeds_bulk(seeds: list[str], workers: int = 40):
+    workers = max(1, min(workers, 50))
     sem = asyncio.Semaphore(workers)
     queue: asyncio.Queue = asyncio.Queue()
 
     connector = aiohttp.TCPConnector(
         limit=CHECK_CONCURRENCY,
-        limit_per_host=40,
+        limit_per_host=30,
         ttl_dns_cache=300,
         enable_cleanup_closed=True,
     )
