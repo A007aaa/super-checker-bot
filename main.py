@@ -254,14 +254,7 @@ async def _run_check_job(context, chat_id: int, user_id: int, full_text: str, st
     try:
         await safe_edit(status_msg, "🔍 Extraindo seeds BIP39...")
         extractor = SeedExtractor()
-        try:
-            stats = await asyncio.wait_for(
-                asyncio.to_thread(extractor.extract_with_stats, full_text),
-                timeout=120,
-            )
-        except asyncio.TimeoutError:
-            await safe_edit(status_msg, "❌ Extração demorou >2min. Texto muito grande?")
-            return
+        stats = await asyncio.to_thread(extractor.extract_with_stats, full_text)
 
         seeds = stats.valid
         if not seeds:
